@@ -33,7 +33,14 @@ void m42_notebook_clear (M42Notebook *self);
 
 /* Writes the notebook to a PDF, a page at a time.  Returns FALSE and
  * sets the error if the file could not be written. */
-gboolean m42_notebook_export_pdf (M42Notebook *self, const char *path, GError **error);
+/* The notebook as pages: to a PDF, or to a printer.  The title is
+ * written at the top of every page and into the PDF's own properties. */
+gboolean m42_notebook_export_pdf (M42Notebook *self, const char *path,
+                                  const char *title, GError **error);
+gboolean m42_notebook_print (M42Notebook *self, const char *title,
+                             GtkWindow *parent, GError **error);
+gboolean m42_notebook_print_to_file (M42Notebook *self, const char *title,
+                                     const char *path, GError **error);
 
 /* The input of the cell at a point, or NULL: what a click gives back,
  * so that a line can be typed again. */

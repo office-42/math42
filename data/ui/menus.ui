@@ -13,6 +13,7 @@
         <item><attribute name="label" translatable="yes">Save _As...</attribute><attribute name="action">win.save-as</attribute></item>
       </section>
       <section>
+        <item><attribute name="label" translatable="yes">_Print...</attribute><attribute name="action">win.print</attribute></item>
         <item><attribute name="label" translatable="yes">_Export as PDF...</attribute><attribute name="action">win.export-pdf</attribute></item>
       </section>
       <section>

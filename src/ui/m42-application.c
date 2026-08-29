@@ -15,6 +15,7 @@ struct _M42Application {
   char *screenshot;      /* --screenshot FILE: render the window and exit */
   char *activate;        /* --activate ACTION: fire a window action first */
   char *export_pdf;      /* --export-pdf FILE: write the notebook out and exit */
+  char *print_to;        /* --print-to FILE: the same, through the printer */
   char *convert;         /* --convert FILE: write it in that file's format and exit */
   int   width, height;   /* --size WxH: how big the window opens */
 };
@@ -30,6 +31,7 @@ static const struct {
   { "win.save",            { "<Control>s", NULL } },
   { "win.save-as",         { "<Control><Shift>s", NULL } },
   { "win.close",           { "<Control>w", NULL } },
+  { "win.print",           { "<Control>p", NULL } },
   { "win.evaluate",        { "<Shift>Return", "<Control>Return", NULL } },
   { "win.clear-output",    { "<Control>l", NULL } },
   { "win.zoom-in",         { "<Control>plus", "<Control>equal", NULL } },
@@ -197,6 +199,25 @@ export_and_quit (gpointer data)
   return G_SOURCE_REMOVE;
 }
 
+/* --print-to sends the notebook through the printing machinery and
+ * puts what comes out in a file, so that the printed pages can be
+ * looked at where there is no printer -- and so that what is checked
+ * is what a printer would be handed. */
+static gboolean
+print_and_quit (gpointer data)
+{
+  M42Application *self = data;
+  GList *windows = gtk_application_get_windows (GTK_APPLICATION (self));
+  g_autoptr (GError) error = NULL;
+
+  if (windows != NULL &&
+      !m42_window_print_to_file (M42_WINDOW (windows->data), self->print_to, &error))
+    g_printerr ("math42: could not print to %s: %s\n", self->print_to,
+                error != NULL ? error->message : "the printer said no");
+  g_application_quit (G_APPLICATION (self));
+  return G_SOURCE_REMOVE;
+}
+
 /* --convert writes the notebook out in whatever format the name given
  * asks for, and quits.  It is how a MATLAB script becomes a notebook,
  * or a notebook a Mathematica one, without opening anything. */
@@ -223,6 +244,8 @@ arm_options (M42Application *self)
     g_timeout_add (500, fire_activate, self);
   if (self->export_pdf != NULL)
     g_timeout_add (900, export_and_quit, self);
+  if (self->print_to != NULL)
+    g_timeout_add (900, print_and_quit, self);
   if (self->screenshot != NULL)
     g_timeout_add (1200, take_screenshot, self);
 }
@@ -290,6 +313,11 @@ m42_application_handle_local_options (GApplication *app, GVariantDict *options)
                                     G_APPLICATION_NON_UNIQUE);
     }
 
+  if (g_variant_dict_lookup (options, "print-to", "^&ay", &path))
+    {
+      g_free (self->print_to);
+      self->print_to = g_strdup (path);
+    }
   if (g_variant_dict_lookup (options, "export-pdf", "^&ay", &path))
     {
       g_free (self->export_pdf);
@@ -318,6 +346,7 @@ m42_application_finalize (GObject *object)
   g_free (M42_APPLICATION (object)->screenshot);
   g_free (M42_APPLICATION (object)->activate);
   g_free (M42_APPLICATION (object)->export_pdf);
+  g_free (M42_APPLICATION (object)->print_to);
   G_OBJECT_CLASS (m42_application_parent_class)->finalize (object);
 }
 
@@ -346,6 +375,9 @@ m42_application_init (M42Application *self)
   g_application_add_main_option (G_APPLICATION (self), "activate", 0,
                                  G_OPTION_FLAG_NONE, G_OPTION_ARG_STRING,
                                  "Fire a window action, such as reference, first", "ACTION");
+  g_application_add_main_option (G_APPLICATION (self), "print-to", 0,
+                                 G_OPTION_FLAG_NONE, G_OPTION_ARG_FILENAME,
+                                 "Print the notebook to a file and exit", "FILE");
   g_application_add_main_option (G_APPLICATION (self), "export-pdf", 0,
                                  G_OPTION_FLAG_NONE, G_OPTION_ARG_FILENAME,
                                  "Write the notebook to a PDF and exit", "FILE");

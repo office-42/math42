@@ -26,5 +26,6 @@ gboolean m42_window_open_file (M42Window *self, GFile *file);
 gboolean m42_window_save_as (M42Window *self, const char *path, GError **error);
 
 gboolean m42_window_export_pdf (M42Window *self, const char *path, GError **error);
+gboolean m42_window_print_to_file (M42Window *self, const char *path, GError **error);
 
 G_END_DECLS

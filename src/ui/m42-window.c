@@ -272,6 +272,16 @@ action_save (GSimpleAction *action, GVariant *param, gpointer data)
     action_save_as (action, param, data);
 }
 
+/* What every printed page is headed with: the file's name, or a word
+ * for a notebook that has not been saved anywhere yet. */
+static char *
+paper_title (M42Window *self)
+{
+  if (self->file != NULL)
+    return g_file_get_basename (self->file);
+  return g_strdup ("Untitled notebook");
+}
+
 static void
 export_pdf_done (GObject *source, GAsyncResult *result, gpointer data)
 {
@@ -288,10 +298,27 @@ export_pdf_done (GObject *source, GAsyncResult *result, gpointer data)
       set_status (self, "That place cannot be written to directly");
       return;
     }
-  if (m42_notebook_export_pdf (M42_NOTEBOOK (self->notebook), path, &error))
-    set_status (self, "Exported to %s", path);
-  else
-    set_status (self, "Could not export: %s", error->message);
+  {
+    g_autofree char *title = paper_title (self);
+
+    if (m42_notebook_export_pdf (M42_NOTEBOOK (self->notebook), path, title, &error))
+      set_status (self, "Exported to %s", path);
+    else
+      set_status (self, "Could not export: %s", error->message);
+  }
+}
+
+static void
+action_print (GSimpleAction *action, GVariant *param, gpointer data)
+{
+  M42Window *self = data;
+  g_autofree char *title = paper_title (self);
+  g_autoptr (GError) error = NULL;
+
+  if (!m42_notebook_print (M42_NOTEBOOK (self->notebook), title,
+                           GTK_WINDOW (self), &error))
+    set_status (self, "Could not print: %s",
+                error != NULL ? error->message : "the printer said no");
 }
 
 static void
@@ -455,6 +482,7 @@ static const GActionEntry WIN_ACTIONS[] = {
   { "zoom-out",        action_zoom_out,        NULL, NULL, NULL, { 0 } },
   { "zoom-reset",      action_zoom_reset,      NULL, NULL, NULL, { 0 } },
   { "export-pdf",      action_export_pdf,      NULL, NULL, NULL, { 0 } },
+  { "print",           action_print,           NULL, NULL, NULL, { 0 } },
   { "reference",       action_reference,       NULL, NULL, NULL, { 0 } },
   { "about",           action_about,           NULL, NULL, NULL, { 0 } },
 };
@@ -610,9 +638,21 @@ m42_window_new (GtkApplication *app)
 }
 
 gboolean
+m42_window_print_to_file (M42Window *self, const char *path, GError **error)
+{
+  g_autofree char *title = paper_title (self);
+
+  return m42_notebook_print_to_file (M42_NOTEBOOK (self->notebook), title, path, error);
+}
+
+gboolean
 m42_window_export_pdf (M42Window *self, const char *path, GError **error)
 {
-  return m42_notebook_export_pdf (M42_NOTEBOOK (self->notebook), path, error);
+  {
+    g_autofree char *title = paper_title (self);
+
+    return m42_notebook_export_pdf (M42_NOTEBOOK (self->notebook), path, title, error);
+  }
 }
 
 gboolean

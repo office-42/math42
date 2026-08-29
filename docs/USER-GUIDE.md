@@ -41,6 +41,7 @@ matrices inside brackets, graphs drawn.
 | **Ctrl +**, **Ctrl −**, **Ctrl 0** | make the mathematics bigger, smaller, ordinary |
 | **F1** | the function reference, with a box that narrows the list as you type |
 | **Ctrl S**, **Ctrl O** | save and open a `.m42` file — the inputs, which are played back |
+| **Ctrl P** | print, through whatever printers the machine has |
 | **File ▸ Export as PDF** | the whole page as vector graphics |
 | **Ctrl L** | clear the page; **Evaluation ▸ Clear Variables** forgets what is defined |
 | **Ctrl Q** | quit |
@@ -48,6 +49,25 @@ matrices inside brackets, graphs drawn.
 A `.m42` file is a plain text file of inputs, one per line. Opening
 one runs every line from the top, so a notebook is reproducible by
 construction.
+
+### On paper
+
+Printing and Export as PDF lay the notebook out the same way: the
+cells down the page, a cell that will not fit moved to the next page,
+and one taller than a whole page drawn smaller so that all of it is
+there. Every page carries the file's name at the top and its number at
+the foot, and the PDF carries the name in its properties, so a printed
+page can be filed and a PDF found by searching. A result wider than the
+page — a graph — is drawn to fit it, as it is in a narrow window.
+
+Everything is vector: the type is type and the graphs are lines, so a
+page stands up to being enlarged or printed at any size.
+
+From a terminal, `math42 --export-pdf out.pdf notebook.m42` writes the
+PDF and `math42 --print-to out.pdf notebook.m42` sends the notebook
+through the printing machinery itself and puts what comes out in a
+file, which is how the printed pages can be looked at where there is
+no printer.
 
 ### Asking what something does
 

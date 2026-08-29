@@ -188,8 +188,10 @@ way.
 typed, and clicking a cell puts its input back on the line to run
 again. Ctrl + and Ctrl − make the mathematics bigger and smaller,
 Ctrl 0 puts it back. Ctrl S saves the notebook as a `.m42` file of its
-inputs, which Ctrl O plays back, and File ▸ Export as PDF writes the
-whole page out as vector graphics. F1 opens the function reference,
+inputs, which Ctrl O plays back, Ctrl P prints, and File ▸ Export as
+PDF writes the whole page out as vector graphics — both of them the
+same layout, each page headed with the file's name and numbered at the
+foot. F1 opens the function reference,
 which lists everything below with its MATLAB spelling and can be
 searched; `?Sin` asks the same question from the input line, and
 `Names[]` gives the whole list.
@@ -272,8 +274,10 @@ Dependencies: GTK 4 (>= 4.10), Pango, Cairo, GLib, Meson and Ninja.
 window to a PNG and exits, which is how the picture above is made and
 how a change can be looked at without a person at the keyboard.
 `--activate reference` opens a dialog first, so it can be pictured
-too, and `--export-pdf out.pdf notebook.m42` writes the PDF without a
-window being touched.
+too, `--export-pdf out.pdf notebook.m42` writes the PDF without a
+window being touched, and `--print-to out.pdf notebook.m42` sends it
+through the printing machinery instead, which is how the printed pages
+are checked where there is no printer.
 
 ## License
 
