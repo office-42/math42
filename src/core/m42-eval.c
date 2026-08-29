@@ -11559,6 +11559,38 @@ eval_call (M42Session *s, const M42Node *n)
         return m42_value_error ("%s: that one is not in the table", name);
       return expr_result (transformed);
     }
+  /* ZTransform[f, n, z]: the sequence is looked at as it was written,
+   * so that n and z both stay names. */
+  if (name_is (name, "InverseZTransform", NULL) && n->children->len == 3)
+    {
+      const M42Node *from = m42_node_child (n, 1), *to = m42_node_child (n, 2);
+      g_autoptr (M42Node) f = NULL;
+      M42Node *back;
+
+      if (from->kind != M42_NODE_IDENT || to->kind != M42_NODE_IDENT)
+        return m42_value_error ("InverseZTransform expects two names");
+      f = symbolic_argument (s, m42_node_child (n, 0), from->name);
+      back = m42_node_inverse_ztransform (f, from->name, to->name);
+      if (back == NULL)
+        return m42_value_error ("InverseZTransform: that one will not come apart");
+      return expr_result (back);
+    }
+
+  if (name_is (name, "ZTransform", NULL) && n->children->len == 3)
+    {
+      const M42Node *from = m42_node_child (n, 1), *to = m42_node_child (n, 2);
+      g_autoptr (M42Node) f = NULL;
+      M42Node *transformed;
+
+      if (from->kind != M42_NODE_IDENT || to->kind != M42_NODE_IDENT)
+        return m42_value_error ("ZTransform expects two names, as in ZTransform[f, n, z]");
+      f = symbolic_argument (s, m42_node_child (n, 0), from->name);
+      transformed = m42_node_ztransform (f, from->name, to->name);
+      if (transformed == NULL)
+        return m42_value_error ("ZTransform: that one is not in the table");
+      return expr_result (transformed);
+    }
+
   if (name_is (name, "Factor", "factor") && n->children->len == 1)
     return factor (s, n);
   if (name_is (name, "Series", "Taylor"))   return series (s, n);

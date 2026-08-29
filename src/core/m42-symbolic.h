@@ -43,6 +43,15 @@ M42Node *m42_node_laplace (const M42Node *n, const char *t, const char *s);
  * fractions the way it is done by hand. */
 M42Node *m42_node_inverse_laplace (const M42Node *n, const char *s, const char *t);
 
+/* The one sided Z transform of a sequence in var, as a function of z.
+ * NULL when it is not in the table a course hands out. */
+M42Node *m42_node_ztransform (const M42Node *n, const char *var, const char *zname);
+
+/* The sequence a Z transform came from, by splitting X(z)/z into
+ * partial fractions.  NULL when that does not work out. */
+M42Node *m42_node_inverse_ztransform (const M42Node *n, const char *zname,
+                                      const char *var);
+
 /* --- polynomials, as lists of coefficients, lowest power first ------- */
 
 /* TRUE when the tree is a polynomial in var with numbers for

@@ -335,6 +335,8 @@ static const M42Function FUNCTIONS[] = {
   { "LogLogPlot", "loglog", "LogLogPlot[f, {x, a, b}]", "with both axes in powers of ten", "Graphs" },
   { "StemPlot", "stem", "StemPlot[list]", "a stalk from the axis with a dot on top", "Graphs" },
   { "StairsPlot", "stairs", "StairsPlot[list]", "held flat, then stepped", "Graphs" },
+  { "InverseZTransform", NULL, "InverseZTransform[z/(z - 2), z, n]", "the sequence a Z transform came from", "Transforms" },
+  { "ZTransform", NULL, "ZTransform[a^n, n, z]", "the one sided Z transform of a sequence", "Transforms" },
   { "VectorPlot", "quiver", "VectorPlot[{p, q}, {x, a, b}, {y, c, d}]", "which way a field points at each place: a direction field", "Graphs" },
   { "ParametricPlot3D", NULL, "ParametricPlot3D[{x, y, z}, {t, a, b}]", "a curve through space", "Graphs" },
   { "DensityPlot", NULL, "DensityPlot[f, {x, a, b}, {y, c, d}]", "the same surface looked straight down on, as colour", "Graphs" },

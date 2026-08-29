@@ -608,6 +608,19 @@ In[j]:= Integrate[x y^2, {x, 0, 1}, {y, 0, 3}]  Out[j]= 9/2
 
 ### Transforms
 
+`ZTransform[f, n, z]` takes a sequence to its one sided Z transform,
+from the table a course hands out — `1`, `n`, `n^2`, `a^n`, `n a^n`,
+`Sin[b n]`, `Cos[b n]`, and sums and multiples of those — and
+`InverseZTransform[X, z, n]` brings it back by splitting `X(z)/z` into
+partial fractions, which handles a repeated pole as well as a simple
+one.
+
+```
+In[z1]:= ZTransform[n 2^n, n, z]              Out[z1]= 2 z/(z - 2)^2
+In[z2]:= InverseZTransform[z/(z^2 - 3z + 2), z, n]   Out[z2]= -1 + 2^n
+In[z3]:= InverseZTransform[z/(z - 1)^2, z, n] Out[z3]= n
+```
+
 | | |
 |---|---|
 | `LaplaceTransform[f, t, s]` | by the table: powers, exponentials, sines, with the shift |

@@ -3361,6 +3361,380 @@ m42_node_inverse_laplace (const M42Node *n, const char *s, const char *t)
   return simple;
 }
 
+/* --- the Z transform ------------------------------------------------------
+ *
+ * The one a course on discrete systems hands out, taken one sided:
+ *
+ *   1        z/(z - 1)              a^n     z/(z - a)
+ *   n        z/(z - 1)^2            n a^n   a z/(z - a)^2
+ *   n^2      z (z + 1)/(z - 1)^3
+ *   Sin[b n] z Sin[b]/(z^2 - 2 z Cos[b] + 1)
+ *   Cos[b n] z (z - Cos[b])/(z^2 - 2 z Cos[b] + 1)
+ *
+ * with sums and constant multiples taken apart the way the Laplace
+ * transform above takes them.  Anything else comes back NULL and the
+ * caller leaves the transform as it was written.
+ */
+static M42Node *z_of (const M42Node *n, const char *var, const char *zname, int depth);
+
+/* a^n, where a is anything the index is not in: the base, or NULL. */
+static const M42Node *
+geometric_base (const M42Node *n, const char *var)
+{
+  if (n->kind != M42_NODE_BINARY || n->op != M42_TOK_CARET)
+    return NULL;
+  if (m42_node_depends_on (m42_node_child (n, 0), var))
+    return NULL;
+  {
+    const M42Node *e = m42_node_child (n, 1);
+
+    if (e->kind == M42_NODE_IDENT && strcmp (e->name, var) == 0)
+      return m42_node_child (n, 0);
+  }
+  return NULL;
+}
+
+/* z^2 - 2 z Cos[b] + 1, which both waves stand over. */
+static M42Node *
+wave_bottom (const M42Node *z, const M42Node *b)
+{
+  return ADD (SUB (POW (CP (z), NUM (2)),
+                   MUL (MUL (NUM (2), CP (z)), CALL ("Cos", CP (b)))),
+              NUM (1));
+}
+
+static M42Node *
+z_of (const M42Node *n, const char *var, const char *zname, int depth)
+{
+  g_autoptr (M42Node) z = m42_node_ident (zname);
+
+  if (depth > 8)
+    return NULL;
+
+  /* Anything the index is not in is a step of that height. */
+  if (!m42_node_depends_on (n, var))
+    return MUL (CP (n), DIV (CP (z), SUB (CP (z), NUM (1))));
+
+  if (n->kind == M42_NODE_IDENT && strcmp (n->name, var) == 0)
+    return DIV (CP (z), POW (SUB (CP (z), NUM (1)), NUM (2)));
+
+  if (n->kind == M42_NODE_BINARY)
+    {
+      if (n->op == M42_TOK_PLUS || n->op == M42_TOK_MINUS)
+        {
+          M42Node *a = z_of (m42_node_child (n, 0), var, zname, depth + 1);
+          M42Node *b = a != NULL ? z_of (m42_node_child (n, 1), var, zname, depth + 1) : NULL;
+
+          if (b == NULL)
+            {
+              m42_node_free (a);
+              return NULL;
+            }
+          return m42_node_binary (n->op, a, b);
+        }
+
+      /* n^2, and a^n. */
+      if (n->op == M42_TOK_CARET)
+        {
+          const M42Node *base = m42_node_child (n, 0), *e = m42_node_child (n, 1);
+
+          if (base->kind == M42_NODE_IDENT && strcmp (base->name, var) == 0 &&
+              e->kind == M42_NODE_NUMBER && e->number == 2)
+            return DIV (MUL (CP (z), ADD (CP (z), NUM (1))),
+                        POW (SUB (CP (z), NUM (1)), NUM (3)));
+          {
+            const M42Node *a = geometric_base (n, var);
+
+            if (a != NULL)
+              return DIV (CP (z), SUB (CP (z), CP (a)));
+          }
+          return NULL;
+        }
+
+      if (n->op == M42_TOK_STAR)
+        {
+          const M42Node *a = m42_node_child (n, 0), *b = m42_node_child (n, 1);
+          const M42Node *base;
+
+          /* A number in front comes through untouched. */
+          if (!m42_node_depends_on (a, var))
+            {
+              M42Node *r = z_of (b, var, zname, depth + 1);
+
+              return r != NULL ? MUL (CP (a), r) : NULL;
+            }
+          if (!m42_node_depends_on (b, var))
+            {
+              M42Node *r = z_of (a, var, zname, depth + 1);
+
+              return r != NULL ? MUL (CP (b), r) : NULL;
+            }
+
+          /* n a^n, either way round. */
+          for (int swap = 0; swap < 2; swap++)
+            {
+              const M42Node *left = swap ? b : a, *right = swap ? a : b;
+
+              base = geometric_base (right, var);
+              if (base != NULL && left->kind == M42_NODE_IDENT &&
+                  strcmp (left->name, var) == 0)
+                return DIV (MUL (CP (base), CP (z)),
+                            POW (SUB (CP (z), CP (base)), NUM (2)));
+            }
+          return NULL;
+        }
+      if (n->op == M42_TOK_SLASH && !m42_node_depends_on (m42_node_child (n, 1), var))
+        {
+          M42Node *r = z_of (m42_node_child (n, 0), var, zname, depth + 1);
+
+          return r != NULL ? DIV (r, CP (m42_node_child (n, 1))) : NULL;
+        }
+      return NULL;
+    }
+
+  if (n->kind == M42_NODE_UNARY && n->op == M42_TOK_MINUS)
+    {
+      M42Node *r = z_of (m42_node_child (n, 0), var, zname, depth + 1);
+
+      return r != NULL ? NEG (r) : NULL;
+    }
+
+  /* Sin[b n] and Cos[b n], with b anything the index is not in. */
+  if (n->kind == M42_NODE_CALL && n->children->len == 1)
+    {
+      gboolean sine = !strcmp (n->name, "Sin") || !strcmp (n->name, "sin");
+      gboolean cosine = !strcmp (n->name, "Cos") || !strcmp (n->name, "cos");
+      const M42Node *inside = m42_node_child (n, 0);
+      g_autoptr (M42Node) b = NULL;
+
+      if (!sine && !cosine)
+        return NULL;
+      if (inside->kind == M42_NODE_IDENT && strcmp (inside->name, var) == 0)
+        b = NUM (1);
+      else if (inside->kind == M42_NODE_BINARY && inside->op == M42_TOK_STAR)
+        {
+          const M42Node *l = m42_node_child (inside, 0), *r = m42_node_child (inside, 1);
+
+          if (r->kind == M42_NODE_IDENT && strcmp (r->name, var) == 0 &&
+              !m42_node_depends_on (l, var))
+            b = CP (l);
+          else if (l->kind == M42_NODE_IDENT && strcmp (l->name, var) == 0 &&
+                   !m42_node_depends_on (r, var))
+            b = CP (r);
+        }
+      if (b == NULL)
+        return NULL;
+      if (sine)
+        return DIV (MUL (CP (z), CALL ("Sin", CP (b))), wave_bottom (z, b));
+      return DIV (MUL (CP (z), SUB (CP (z), CALL ("Cos", CP (b)))), wave_bottom (z, b));
+    }
+  return NULL;
+}
+
+M42Node *
+m42_node_ztransform (const M42Node *n, const char *var, const char *zname)
+{
+  M42Node *raw = z_of (n, var, zname, 0);
+  M42Node *simple;
+
+  if (raw == NULL)
+    return NULL;
+  simple = m42_node_simplify (raw);
+  m42_node_free (raw);
+  return simple;
+}
+
+/* --- and back again -------------------------------------------------------
+ *
+ * X(z)/z split into partial fractions is a sum of c/(z - a), and each
+ * of those came from c a^n.  That is the whole method a course
+ * teaches, and it is the whole of what is here.
+ */
+
+/* c/(z - a)^k as its numbers, or FALSE.  The denominator has to be a
+ * line in z, or a line squared, and the numerator free of it. */
+static gboolean
+simple_pole (const M42Node *term, const char *zname, M42Node **c, M42Node **a,
+             int *order)
+{
+  const M42Node *top, *bottom;
+  g_autoptr (GArray) den = g_array_new (FALSE, TRUE, sizeof (double));
+
+  *order = 1;
+  if (term->kind != M42_NODE_BINARY || term->op != M42_TOK_SLASH)
+    return FALSE;
+  top = m42_node_child (term, 0);
+  bottom = m42_node_child (term, 1);
+  if (m42_node_depends_on (top, zname))
+    return FALSE;
+  /* (z - a)^2 underneath: the same pole, twice over. */
+  if (bottom->kind == M42_NODE_BINARY && bottom->op == M42_TOK_CARET &&
+      m42_node_child (bottom, 1)->kind == M42_NODE_NUMBER &&
+      m42_node_child (bottom, 1)->number == 2)
+    {
+      *order = 2;
+      bottom = m42_node_child (bottom, 0);
+    }
+  if (!poly_of (bottom, zname, den, 0))
+    return FALSE;
+  poly_trim (den);
+
+  /* A square written out rather than as a power: z^2 - 2 a z + a^2 is
+   * (z - a)^2, which Apart leaves as it found it. */
+  if (den->len == 3 && *order == 1)
+    {
+      double p = g_array_index (den, double, 2);
+      double q = g_array_index (den, double, 1);
+      double r = g_array_index (den, double, 0);
+      double disc = q * q - 4 * p * r;
+
+      if (fabs (p) < 1e-14 || fabs (disc) > 1e-9 * MAX (1.0, q * q))
+        return FALSE;
+      *order = 2;
+      *c = p == 1 ? CP (top) : DIV (CP (top), number_node (p));
+      *a = number_node (-q / (2 * p));
+      return TRUE;
+    }
+
+  if (den->len != 2 || fabs (g_array_index (den, double, 1)) < 1e-14)
+    return FALSE;
+  {
+    double lead = g_array_index (den, double, 1);
+    double root = -g_array_index (den, double, 0) / lead;
+
+    *c = lead == 1 ? CP (top) : DIV (CP (top), number_node (lead));
+    *a = number_node (root);
+  }
+  return TRUE;
+}
+
+/* Every term of a sum, added to the answer one at a time. */
+static gboolean
+inverse_z_terms (const M42Node *n, const char *zname, const char *var,
+                 M42Node **out, gboolean negate, int depth)
+{
+  if (depth > 12)
+    return FALSE;
+
+  if (n->kind == M42_NODE_BINARY && (n->op == M42_TOK_PLUS || n->op == M42_TOK_MINUS))
+    return inverse_z_terms (m42_node_child (n, 0), zname, var, out, negate, depth + 1) &&
+           inverse_z_terms (m42_node_child (n, 1), zname, var, out,
+                            n->op == M42_TOK_MINUS ? !negate : negate, depth + 1);
+  if (n->kind == M42_NODE_UNARY && n->op == M42_TOK_MINUS)
+    return inverse_z_terms (m42_node_child (n, 0), zname, var, out, !negate, depth + 1);
+
+  /* A term with no z left in it belongs to the very first step alone,
+   * which this method has nothing to say about. */
+  if (!m42_node_depends_on (n, zname))
+    return FALSE;
+
+  {
+    M42Node *c = NULL, *a = NULL;
+    M42Node *piece;
+    int order = 1;
+
+    if (!simple_pole (n, zname, &c, &a, &order))
+      return FALSE;
+    if (order == 2)
+      {
+        /* c/(z - a)^2 came from c n a^(n-1). */
+        if (a->kind == M42_NODE_NUMBER && a->number == 1)
+          {
+            m42_node_free (a);
+            piece = MUL (c, m42_node_ident (var));
+          }
+        else
+          piece = MUL (MUL (c, m42_node_ident (var)),
+                       POW (a, SUB (m42_node_ident (var), NUM (1))));
+      }
+    /* c a^n, and a of one is just c. */
+    else if (a->kind == M42_NODE_NUMBER && a->number == 1)
+      {
+        m42_node_free (a);
+        piece = c;
+      }
+    else
+      piece = MUL (c, POW (a, m42_node_ident (var)));
+    if (negate)
+      piece = NEG (piece);
+    *out = *out == NULL ? piece : ADD (*out, piece);
+    return TRUE;
+  }
+}
+
+M42Node *
+m42_node_inverse_ztransform (const M42Node *n, const char *zname, const char *var)
+{
+  g_autoptr (GArray) top = g_array_new (FALSE, TRUE, sizeof (double));
+  g_autoptr (GArray) bottom = g_array_new (FALSE, TRUE, sizeof (double));
+  g_autoptr (M42Node) over_z = NULL;
+  g_autoptr (M42Node) split = NULL;
+  M42Node *out = NULL;
+
+  /* X(z)/z, done on the coefficients rather than by writing another
+   * fraction underneath: the numerator of a Z transform has a factor
+   * of z in it, and taking that off is exactly dividing by z.  Written
+   * as a tower instead, nothing would cancel it and the split below
+   * would have nothing to work with. */
+  {
+    /* A sum of fractions goes over one denominator first, so that
+     * there is a numerator and a denominator to take apart. */
+    g_autoptr (M42Node) whole = m42_node_together (n);
+    const M42Node *num = whole != NULL ? whole : n, *den = NULL;
+
+    if (num->kind == M42_NODE_BINARY && num->op == M42_TOK_SLASH)
+      {
+        den = m42_node_child (num, 1);
+        num = m42_node_child (num, 0);
+      }
+    if (!poly_of (num, zname, top, 0))
+      return NULL;
+    if (den != NULL && !poly_of (den, zname, bottom, 0))
+      return NULL;
+    if (den == NULL)
+      {
+        g_array_set_size (bottom, 1);
+        g_array_index (bottom, double, 0) = 1;
+      }
+    poly_trim (top);
+    poly_trim (bottom);
+
+    if (top->len > 1 && fabs (g_array_index (top, double, 0)) < 1e-14)
+      g_array_remove_index (top, 0);        /* the factor of z comes off */
+    else
+      {
+        double nothing = 0;                 /* or z goes underneath */
+
+        g_array_prepend_val (bottom, nothing);
+      }
+    {
+      g_autoptr (M42Node) p = m42_node_from_polynomial (top, zname);
+      g_autoptr (M42Node) q = m42_node_from_polynomial (bottom, zname);
+
+      if (p == NULL || q == NULL)
+        return NULL;
+      over_z = DIV (g_steal_pointer (&p), g_steal_pointer (&q));
+    }
+  }
+
+  split = m42_node_apart (over_z, zname);
+  if (split == NULL)
+    split = m42_node_simplify (over_z);
+  if (split == NULL)
+    return NULL;
+  if (!inverse_z_terms (split, zname, var, &out, FALSE, 0))
+    {
+      m42_node_free (out);
+      return NULL;
+    }
+  {
+    M42Node *simple = m42_node_simplify (out);
+
+    m42_node_free (out);
+    return simple;
+  }
+}
+
 /* --- polynomials and rational functions, for the outside world ---------- */
 
 gboolean
