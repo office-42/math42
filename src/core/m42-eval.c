@@ -481,6 +481,8 @@ static M42Value *index_value (M42Value *v, GPtrArray *indices, guint from);
 static M42Value *lookup (M42Session *s, const char *name);
 static M42Value *interpolation_function (M42Session *s, const M42Value *data);
 static M42Value *import_file (const char *path, const char *what);
+static M42Node *cancel_common_factor (const M42Node *tree);
+static gboolean pattern_test (const M42Node *test, GHashTable *names, gpointer user_data);
 static void add_contours (M42Plot *p, const double *z, guint n, double x0, double x1,
                           double y0, double y1, double lowest, double highest,
                           guint levels);
@@ -3549,6 +3551,313 @@ without_bars (const M42Node *n)
   return out;
 }
 
+/* A table of rules written as source, applied to a tree the way a
+ * user's own rule would be applied to it.  Rounds says how many times
+ * to go round the table, which matters when one rule makes work for
+ * another: Sin[x]^4 has to be halved twice. */
+static M42Node *
+rewrite_by_rules (M42Session *s, const M42Node *tree, const char *const *rules,
+                  guint count, guint rounds)
+{
+  M42Node *out;
+
+  if (tree == NULL)
+    return NULL;
+  out = m42_node_copy (tree);
+  for (guint round = 0; round < rounds; round++)
+    for (guint i = 0; i < count; i++)
+      {
+        g_autofree char *complaint = NULL;
+        g_autoptr (M42Node) rule = m42_parse (rules[i], &complaint);
+        const M42Node *use = rule;
+        M42Node *shorter;
+
+        /* A line of source comes back wrapped when it is a statement. */
+        while (use != NULL && use->kind == M42_NODE_SEQ && use->children->len == 1)
+          use = m42_node_child (use, 0);
+        if (use == NULL || use->kind != M42_NODE_RULE)
+          continue;
+        shorter = m42_node_replace_all (out, m42_node_child (use, 0),
+                                        m42_node_child (use, 1), pattern_test, s, NULL);
+        m42_node_free (out);
+        out = shorter;
+      }
+  return out;
+}
+
+/* The identities that hold whatever the letters stand for, written as
+ * the patterns they are and looked for the same way a rule would look
+ * for them.  Nothing here needs to know that a number is positive or a
+ * name is real, because none of these do.
+ *
+ * Simplify uses it, and so does anything that has built an expression
+ * it means to go on working with -- the Wronskian of Cos and Sin is
+ * Cos^2 + Sin^2, and nothing can be integrated against that until it
+ * is 1. */
+static M42Node *
+apply_identities (M42Session *s, const M42Node *tree)
+{
+  static const char *const IDENTITIES[] = {
+    "Sin[u_]^2 + Cos[u_]^2 -> 1",
+    "Cos[u_]^2 + Sin[u_]^2 -> 1",
+    "A_ Sin[u_]^2 + A_ Cos[u_]^2 -> A",
+    "A_ Cos[u_]^2 + A_ Sin[u_]^2 -> A",
+    "A_ Sin[u_]^2/B_ + A_ Cos[u_]^2/B_ -> A/B",
+    "A_ Cos[u_]^2/B_ + A_ Sin[u_]^2/B_ -> A/B",
+    "Cosh[u_]^2 - Sinh[u_]^2 -> 1",
+    "2 Sin[u_] Cos[u_] -> Sin[2 u]",
+    "Exp[u_] Exp[v_] -> Exp[u + v]",
+    "Sqrt[u_] Sqrt[u_] -> u",
+  };
+
+  return rewrite_by_rules (s, tree, IDENTITIES, G_N_ELEMENTS (IDENTITIES), 1);
+}
+
+
+/* Everything Simplify does, as a tree in and a tree out.  The places
+ * inside the evaluator that want a short answer -- variation of
+ * parameters above all, where a Wronskian left long is a Wronskian
+ * nothing can be integrated over -- reach for this, so that what they
+ * work with is what a user typing Simplify would have seen. */
+static M42Node *simplify_hard (M42Session *s, const M42Node *written);
+
+/* The arguments of a function, shortened in place.  An angle that was
+ * built by adding two angles up is written x + x until somebody adds
+ * it, and Sin[x + x] is not the Sin[2 x] it is. */
+static void
+simplify_arguments (M42Session *s, M42Node *n)
+{
+  if (n == NULL || n->children == NULL)
+    return;
+  for (guint i = 0; i < n->children->len; i++)
+    {
+      M42Node *c = g_ptr_array_index (n->children, i);
+
+      if (n->kind == M42_NODE_CALL)
+        {
+          M42Node *shorter = simplify_hard (s, c);
+
+          if (shorter != NULL)
+            {
+              g_ptr_array_index (n->children, i) = shorter;
+              m42_node_free (c);
+            }
+        }
+      else
+        simplify_arguments (s, c);
+    }
+}
+
+static M42Node *
+simplify_hard (M42Session *s, const M42Node *written)
+{
+  M42Node *tree;
+
+  if (written == NULL)
+    return NULL;
+  {
+    g_autoptr (M42Node) plain = m42_node_simplify (written);
+
+    tree = apply_identities (s, plain);
+  }
+
+  /* A fraction with something dividing both halves loses it. */
+  {
+    M42Node *shorter = cancel_common_factor (tree);
+
+    if (shorter != NULL)
+      {
+        m42_node_free (tree);
+        tree = shorter;
+      }
+  }
+
+  /* Multiplying out is sometimes the simpler answer and sometimes not,
+   * so both are written down and the shorter one wins, which is how
+   * Mathematica chooses too.  It is what turns x + x into 2 x and
+   * leaves (x + 1)^10 alone. */
+  {
+    M42Node *wide = m42_node_expand (tree);
+    g_autoptr (GString) as_is = g_string_new (NULL);
+    g_autoptr (GString) opened = g_string_new (NULL);
+
+    m42_node_to_string (as_is, tree);
+    m42_node_to_string (opened, wide);
+    if (opened->len < as_is->len)
+      {
+        m42_node_free (tree);
+        tree = wide;
+      }
+    else
+      m42_node_free (wide);
+  }
+
+  /* Inside the functions too, and then once more over the whole, since
+   * a folded argument can be the thing that lets a rule take: Cos[x -
+   * 2 x] is Cos[-x] is Cos[x]. */
+  simplify_arguments (s, tree);
+  {
+    M42Node *again = m42_node_simplify (tree);
+
+    if (again != NULL)
+      {
+        m42_node_free (tree);
+        tree = again;
+      }
+  }
+  return tree;
+}
+
+/* Products and powers of waves written as a sum of waves, each of them
+ * to the first power: Sin[x] Cos[x] is Sin[2 x]/2.  It is the step that
+ * makes a long trigonometric answer short, and the one that turns an
+ * integral nothing can be done with into a sum of integrals that can.
+ * Mathematica calls it TrigReduce. */
+static M42Node *
+trig_reduce (M42Session *s, const M42Node *tree)
+{
+  static const char *const TO_SUMS[] = {
+    "Sin[u_]^4 -> (3 - 4 Cos[2 u] + Cos[4 u])/8",
+    "Cos[u_]^4 -> (3 + 4 Cos[2 u] + Cos[4 u])/8",
+    "Sin[u_]^3 -> (3 Sin[u] - Sin[3 u])/4",
+    "Cos[u_]^3 -> (3 Cos[u] + Cos[3 u])/4",
+    "Sin[u_]^2 -> (1 - Cos[2 u])/2",
+    "Cos[u_]^2 -> (1 + Cos[2 u])/2",
+    "Sinh[u_]^2 -> (Cosh[2 u] - 1)/2",
+    "Cosh[u_]^2 -> (Cosh[2 u] + 1)/2",
+    "Sin[u_] Sin[v_] -> (Cos[u - v] - Cos[u + v])/2",
+    "Cos[u_] Cos[v_] -> (Cos[u - v] + Cos[u + v])/2",
+    "Sin[u_] Cos[v_] -> (Sin[u + v] + Sin[u - v])/2",
+    "Cos[u_] Sin[v_] -> (Sin[u + v] - Sin[u - v])/2",
+  };
+  /* A product hiding behind brackets -- Sin[2 x] (Cos[x]/4 - Cos[3 x]/12)
+   * -- is not a product of two waves to look at, so it is multiplied
+   * out before the rules are let near it. */
+  g_autoptr (M42Node) wide = m42_node_expand (tree);
+  g_autoptr (M42Node) opened = rewrite_by_rules (s, wide, TO_SUMS,
+                                                 G_N_ELEMENTS (TO_SUMS), 3);
+  /* Half of Sin[x] and a sixth of it are two thirds of it, and only
+   * multiplying out says so.  Halving twice has to be written as a
+   * twelfth before it is multiplied out, or the answer comes back in
+   * decimals. */
+  g_autoptr (M42Node) tidy = simplify_hard (s, opened);
+  g_autoptr (M42Node) added = m42_node_expand (tidy);
+
+  return simplify_hard (s, added);
+}
+
+/* The other way about: a wave of a sum, or of a multiple of an angle,
+ * written out in waves of the angle itself.  Sin[x + y] becomes
+ * Sin[x] Cos[y] + Cos[x] Sin[y], and Sin[2 x] becomes 2 Sin[x] Cos[x].
+ * Mathematica calls it TrigExpand. */
+static M42Node *
+trig_expand (M42Session *s, const M42Node *tree)
+{
+  static const char *const TO_PARTS[] = {
+    "Sin[3 u_] -> 3 Sin[u] - 4 Sin[u]^3",
+    "Cos[3 u_] -> 4 Cos[u]^3 - 3 Cos[u]",
+    "Sin[2 u_] -> 2 Sin[u] Cos[u]",
+    "Cos[2 u_] -> Cos[u]^2 - Sin[u]^2",
+    "Tan[2 u_] -> 2 Tan[u]/(1 - Tan[u]^2)",
+    "Sin[u_ + v_] -> Sin[u] Cos[v] + Cos[u] Sin[v]",
+    "Sin[u_ - v_] -> Sin[u] Cos[v] - Cos[u] Sin[v]",
+    "Cos[u_ + v_] -> Cos[u] Cos[v] - Sin[u] Sin[v]",
+    "Cos[u_ - v_] -> Cos[u] Cos[v] + Sin[u] Sin[v]",
+    "Tan[u_ + v_] -> (Tan[u] + Tan[v])/(1 - Tan[u] Tan[v])",
+    "Sinh[u_ + v_] -> Sinh[u] Cosh[v] + Cosh[u] Sinh[v]",
+    "Cosh[u_ + v_] -> Cosh[u] Cosh[v] + Sinh[u] Sinh[v]",
+    "Sinh[2 u_] -> 2 Sinh[u] Cosh[u]",
+    "Cosh[2 u_] -> Cosh[u]^2 + Sinh[u]^2",
+  };
+  g_autoptr (M42Node) opened = rewrite_by_rules (s, tree, TO_PARTS,
+                                                 G_N_ELEMENTS (TO_PARTS), 3);
+  g_autoptr (M42Node) wide = m42_node_expand (opened);
+
+  return simplify_hard (s, wide);
+}
+
+/* One solution of a y'' + b y' + c y == R(x), with the two solutions of
+ * the homogeneous equation already in hand:
+ *
+ *   yp = -y1 INT (y2 R)/(a W) dx + y2 INT (y1 R)/(a W) dx
+ *
+ * where W is the Wronskian y1 y2' - y1' y2.  It is called variation of
+ * parameters, and it is the method that needs no guessing about the
+ * shape of R -- anything math42 can integrate will do.  NULL when one
+ * of the two integrals is not one it can. */
+static M42Node *
+variation_of_parameters (M42Session *s, const M42Node *y1, const M42Node *y2,
+                         const M42Node *r, double lead, const char *var)
+{
+  g_autoptr (M42Node) d1 = m42_node_differentiate (y1, var);
+  g_autoptr (M42Node) d2 = m42_node_differentiate (y2, var);
+  g_autoptr (M42Node) wronskian = NULL;
+  g_autoptr (M42Node) first = NULL, second = NULL;
+  double check;
+
+  if (d1 == NULL || d2 == NULL || fabs (lead) < 1e-14)
+    return NULL;
+  {
+    g_autoptr (M42Node) left = m42_node_binary (M42_TOK_STAR, m42_node_copy (y1),
+                                                m42_node_copy (d2));
+    g_autoptr (M42Node) right = m42_node_binary (M42_TOK_STAR, m42_node_copy (d1),
+                                                 m42_node_copy (y2));
+    g_autoptr (M42Node) whole = m42_node_binary (M42_TOK_MINUS, g_steal_pointer (&left),
+                                                 g_steal_pointer (&right));
+
+    wronskian = simplify_hard (s, whole);
+  }
+  /* Two solutions that are not really two would divide by nothing. */
+  if (wronskian == NULL || (constant_fold (wronskian, &check) && fabs (check) < 1e-14))
+    return NULL;
+
+  for (int which = 0; which < 2; which++)
+    {
+      const M42Node *other = which == 0 ? y2 : y1;
+      g_autoptr (M42Node) top = m42_node_binary (M42_TOK_STAR, m42_node_copy (other),
+                                                 m42_node_copy (r));
+      g_autoptr (M42Node) bottom = m42_node_binary (M42_TOK_STAR, m42_node_number (lead),
+                                                    m42_node_copy (wronskian));
+      g_autoptr (M42Node) ratio = m42_node_binary (M42_TOK_SLASH, g_steal_pointer (&top),
+                                                   g_steal_pointer (&bottom));
+      g_autoptr (M42Node) tidy = simplify_hard (s, ratio);
+      M42Node *found = tidy == NULL ? NULL : m42_node_integrate (tidy, var);
+
+      if (found == NULL)
+        return NULL;
+      if (which == 0)
+        first = found;
+      else
+        second = found;
+    }
+
+  {
+    g_autoptr (M42Node) a = m42_node_binary (M42_TOK_STAR, m42_node_copy (y1),
+                                             m42_node_copy (first));
+    g_autoptr (M42Node) b = m42_node_binary (M42_TOK_STAR, m42_node_copy (y2),
+                                             m42_node_copy (second));
+    g_autoptr (M42Node) whole = m42_node_binary (M42_TOK_MINUS, g_steal_pointer (&b),
+                                                 g_steal_pointer (&a));
+    M42Node *plain = simplify_hard (s, whole);
+    g_autoptr (M42Node) waves = trig_reduce (s, plain);
+    g_autoptr (GString) as_is = g_string_new (NULL);
+    g_autoptr (GString) added = g_string_new (NULL);
+
+    /* Cos[2 x] Sin[3 x]/12 - Cos[2 x] Sin[x]/4 - ... is Sin[x]/3, and
+     * it takes the product-to-sum rules to see it. */
+    if (waves == NULL)
+      return plain;
+    m42_node_to_string (as_is, plain);
+    m42_node_to_string (added, waves);
+    if (added->len < as_is->len)
+      {
+        m42_node_free (plain);
+        return g_steal_pointer (&waves);
+      }
+    return plain;
+  }
+}
+
 /* y' + p(x) y == q(x), by the integrating factor Exp[INT p dx]:
  *
  *   y = (INT mu q dx + C1)/mu
@@ -3958,6 +4267,52 @@ dsolve (M42Session *s, const M42Node *call)
 
     if (!constant_fold (simple, &rest))
       {
+        /* Something of x on the right.  With two constant coefficients
+         * in front, the homogeneous solutions are known and variation
+         * of parameters finishes it whatever R turns out to be. */
+        if (fabs (a) > 1e-14)
+          {
+            Solution home;
+
+            if (solve_linear_ode (a, b, c, 0, var, &home) && home.count == 2)
+              {
+                g_autoptr (M42Node) right =
+                  m42_node_unary (M42_TOK_MINUS, m42_node_copy (simple));
+                g_autoptr (M42Node) tidy = m42_node_simplify (right);
+                M42Node *particular =
+                  variation_of_parameters (s, home.basis[0], home.basis[1], tidy, a, var);
+
+                /* Multiplied out, the terms that cancel can cancel and
+                 * the identities can see the squares they are looking
+                 * for; without it the answer is right but unreadable. */
+                if (particular != NULL)
+                  {
+                    g_autoptr (M42Node) wide = m42_node_expand (particular);
+                    g_autoptr (M42Node) known = apply_identities (s, wide);
+
+                    m42_node_free (particular);
+                    particular = m42_node_simplify (known);
+                  }
+
+                if (particular != NULL)
+                  {
+                    M42Node *whole = m42_node_binary (M42_TOK_PLUS,
+                      m42_node_binary (M42_TOK_PLUS,
+                        m42_node_binary (M42_TOK_STAR, m42_node_ident ("C1"),
+                                         m42_node_copy (home.basis[0])),
+                        m42_node_binary (M42_TOK_STAR, m42_node_ident ("C2"),
+                                         m42_node_copy (home.basis[1]))),
+                      particular);
+
+                    g_autoptr (M42Node) built = whole;
+
+                    solution_clear (&home);
+                    return expr_result (m42_node_simplify (built));
+                  }
+                solution_clear (&home);
+              }
+          }
+
         /* Something of x on the right: the first order equation still
          * comes out by its integrating factor. */
         M42Node *by_factor = first_order_linear (marked, var);
@@ -11106,6 +11461,24 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       return m42_value_expr (span);
     }
 
+  if (name_is (name, "TrigReduce", NULL) && args->len == 1)
+    {
+      g_autoptr (M42Node) written = value_to_node (ARG (0));
+
+      if (written == NULL)
+        return m42_value_ref (ARG (0));
+      return expr_result (trig_reduce (s, written));
+    }
+
+  if (name_is (name, "TrigExpand", NULL) && args->len == 1)
+    {
+      g_autoptr (M42Node) written = value_to_node (ARG (0));
+
+      if (written == NULL)
+        return m42_value_ref (ARG (0));
+      return expr_result (trig_expand (s, written));
+    }
+
   if ((name_is (name, "Simplify", "simplify") ||
        name_is (name, "FullSimplify", NULL)) && args->len == 1)
     {
@@ -11114,67 +11487,11 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
        * a rule would look for them.  Nothing here needs to know that a
        * number is positive or a name is real, because none of these
        * do. */
-      static const char *const IDENTITIES[] = {
-        "Sin[u_]^2 + Cos[u_]^2 -> 1",
-        "Cos[u_]^2 + Sin[u_]^2 -> 1",
-        "Cosh[u_]^2 - Sinh[u_]^2 -> 1",
-        "2 Sin[u_] Cos[u_] -> Sin[2 u]",
-        "Exp[u_] Exp[v_] -> Exp[u + v]",
-        "Sqrt[u_] Sqrt[u_] -> u",
-      };
-      g_autoptr (M42Node) tree = value_to_node (ARG (0));
+      g_autoptr (M42Node) written = value_to_node (ARG (0));
 
-      if (tree == NULL)
+      if (written == NULL)
         return m42_value_ref (ARG (0));
-      for (guint i = 0; i < G_N_ELEMENTS (IDENTITIES); i++)
-        {
-          g_autofree char *complaint = NULL;
-          g_autoptr (M42Node) rule = m42_parse (IDENTITIES[i], &complaint);
-          const M42Node *use = rule;
-          M42Node *shorter;
-
-          /* A line of source comes back wrapped when it is a statement. */
-          while (use != NULL && use->kind == M42_NODE_SEQ && use->children->len == 1)
-            use = m42_node_child (use, 0);
-          if (use == NULL || use->kind != M42_NODE_RULE)
-            continue;
-          shorter = m42_node_replace_all (tree, m42_node_child (use, 0),
-                                          m42_node_child (use, 1), pattern_test, s, NULL);
-          m42_node_free (tree);
-          tree = shorter;
-        }
-
-      /* A fraction with something dividing both halves loses it. */
-      {
-        M42Node *shorter = cancel_common_factor (tree);
-
-        if (shorter != NULL)
-          {
-            m42_node_free (tree);
-            tree = shorter;
-          }
-      }
-
-      /* Multiplying out is sometimes the simpler answer and sometimes
-       * not, so both are written down and the shorter one wins, which
-       * is how Mathematica chooses too.  It is what turns x + x into
-       * 2 x and leaves (x + 1)^10 alone. */
-      {
-        M42Node *wide = m42_node_expand (tree);
-        g_autoptr (GString) as_is = g_string_new (NULL);
-        g_autoptr (GString) opened = g_string_new (NULL);
-
-        m42_node_to_string (as_is, tree);
-        m42_node_to_string (opened, wide);
-        if (opened->len < as_is->len)
-          {
-            m42_node_free (tree);
-            tree = wide;
-          }
-        else
-          m42_node_free (wide);
-      }
-      return expr_result (m42_node_copy (tree));
+      return expr_result (simplify_hard (s, written));
     }
 
   /* An unknown function of symbolic arguments stays symbolic, so that

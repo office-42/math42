@@ -295,6 +295,72 @@ fold (int op, double a, double b)
     }
 }
 
+/* A whole number, or a fraction of two whole numbers, read off as a
+ * pair.  A fraction is left standing as two nodes so that it prints as
+ * one, which means the arithmetic of fractions has to be done here
+ * rather than left to the doubles: 5/2 - 1 is 3/2, and an exponent
+ * half-done is what makes a derivative read (x + 1)^(5/2 - 1). */
+static gboolean
+rational_of (const M42Node *n, gint64 *p, gint64 *q)
+{
+  if (n->kind == M42_NODE_NUMBER && n->number == floor (n->number) &&
+      fabs (n->number) < 1e9)
+    {
+      *p = (gint64) n->number;
+      *q = 1;
+      return TRUE;
+    }
+  if (n->kind == M42_NODE_UNARY && n->op == M42_TOK_MINUS)
+    {
+      if (!rational_of (m42_node_child (n, 0), p, q))
+        return FALSE;
+      *p = -*p;
+      return TRUE;
+    }
+  if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_SLASH)
+    {
+      gint64 ap, aq, bp, bq;
+
+      if (!rational_of (m42_node_child (n, 0), &ap, &aq) ||
+          !rational_of (m42_node_child (n, 1), &bp, &bq) || bp == 0)
+        return FALSE;
+      *p = ap * bq;
+      *q = aq * bp;
+      return TRUE;
+    }
+  return FALSE;
+}
+
+/* The pair written back as a node, in lowest terms, and as a plain
+ * number when it divides out. */
+static M42Node *
+rational_node (gint64 p, gint64 q)
+{
+  gint64 u = ABS (p), v = ABS (q), g;
+
+  if (q == 0)
+    return NULL;
+  while (v != 0)
+    {
+      gint64 t = u % v;
+
+      u = v;
+      v = t;
+    }
+  g = u == 0 ? 1 : u;
+  p /= g;
+  q /= g;
+  if (q < 0)
+    {
+      p = -p;
+      q = -q;
+    }
+  if (q == 1)
+    return m42_node_number ((double) p);
+  return m42_node_binary (M42_TOK_SLASH, m42_node_number ((double) p),
+                          m42_node_number ((double) q));
+}
+
 /* The number at the front of a product, however deeply the product is
  * nested to the left: 3 (2 x y) is 6 x y.  Returns what is left, or
  * NULL when the whole thing was a number. */
@@ -468,6 +534,35 @@ m42_node_simplify (const M42Node *n)
             }
         }
 
+      /* One of the two is a fraction: then the sum, difference,
+       * product or quotient is one too, and it is worked out exactly
+       * rather than through the doubles. */
+      if (op == M42_TOK_PLUS || op == M42_TOK_MINUS || op == M42_TOK_STAR ||
+          op == M42_TOK_SLASH)
+        {
+          gint64 ap, aq, bp, bq;
+
+          if (!(is_number (a) && is_number (b)) &&
+              rational_of (a, &ap, &aq) && rational_of (b, &bp, &bq))
+            {
+              M42Node *exact = NULL;
+
+              switch (op)
+                {
+                case M42_TOK_PLUS:  exact = rational_node (ap * bq + bp * aq, aq * bq); break;
+                case M42_TOK_MINUS: exact = rational_node (ap * bq - bp * aq, aq * bq); break;
+                case M42_TOK_STAR:  exact = rational_node (ap * bp, aq * bq); break;
+                default:            exact = bp == 0 ? NULL : rational_node (ap * bq, aq * bp);
+                }
+              if (exact != NULL)
+                {
+                  m42_node_free (a);
+                  m42_node_free (b);
+                  return exact;
+                }
+            }
+        }
+
 #define DROP_A() do { m42_node_free (a); return b; } while (0)
 #define DROP_B() do { m42_node_free (b); return a; } while (0)
       switch (op)
@@ -475,6 +570,23 @@ m42_node_simplify (const M42Node *n)
         case M42_TOK_PLUS:
           if (is_num (a, 0)) DROP_A ();
           if (is_num (b, 0)) DROP_B ();
+          /* Adding a minus sign is taking away, which is how x + -x
+           * gets as far as the rule that says a thing less itself is
+           * nothing.  Either way round: -x + x is x - x. */
+          if (b->kind == M42_NODE_UNARY && b->op == M42_TOK_MINUS)
+            {
+              M42Node *inner = g_ptr_array_steal_index (b->children, 0);
+
+              m42_node_free (b);
+              return simplify_and_free (m42_node_binary (M42_TOK_MINUS, a, inner));
+            }
+          if (a->kind == M42_NODE_UNARY && a->op == M42_TOK_MINUS)
+            {
+              M42Node *inner = g_ptr_array_steal_index (a->children, 0);
+
+              m42_node_free (a);
+              return simplify_and_free (m42_node_binary (M42_TOK_MINUS, b, inner));
+            }
           /* a + -b -> a - b, whether the minus is an operator or part
            * of the number: a sum should never read "+ (-6)". */
           if (b->kind == M42_NODE_UNARY && b->op == M42_TOK_MINUS)
@@ -512,6 +624,21 @@ m42_node_simplify (const M42Node *n)
           break;
         case M42_TOK_MINUS:
           if (is_num (b, 0)) DROP_B ();
+          /* A thing less itself is nothing, which is what turns
+           * Exp[x] Exp[-x] into Exp[x - x] into one. */
+          {
+            g_autoptr (GString) left = g_string_new (NULL);
+            g_autoptr (GString) right = g_string_new (NULL);
+
+            m42_node_to_string (left, a);
+            m42_node_to_string (right, b);
+            if (strcmp (left->str, right->str) == 0)
+              {
+                m42_node_free (a);
+                m42_node_free (b);
+                return m42_node_number (0);
+              }
+          }
           /* a - (-c) is a + c. */
           if (is_number (b) && b->number < 0)
             {
@@ -532,6 +659,45 @@ m42_node_simplify (const M42Node *n)
             }
           break;
         case M42_TOK_STAR:
+          /* A minus sign inside a product comes out in front of it,
+           * where the rest of the rules can see past it. */
+          if (a->kind == M42_NODE_UNARY && a->op == M42_TOK_MINUS)
+            {
+              M42Node *inner = g_ptr_array_steal_index (a->children, 0);
+
+              m42_node_free (a);
+              return simplify_and_free (
+                m42_node_unary (M42_TOK_MINUS,
+                                m42_node_binary (M42_TOK_STAR, inner, b)));
+            }
+          if (b->kind == M42_NODE_UNARY && b->op == M42_TOK_MINUS)
+            {
+              M42Node *inner = g_ptr_array_steal_index (b->children, 0);
+
+              m42_node_free (b);
+              return simplify_and_free (
+                m42_node_unary (M42_TOK_MINUS,
+                                m42_node_binary (M42_TOK_STAR, a, inner)));
+            }
+          /* Two exponentials multiplied add their powers, which is what
+           * makes the Wronskian of Exp[x] and Exp[-x] a number. */
+          if (a->kind == M42_NODE_CALL && b->kind == M42_NODE_CALL &&
+              a->children->len == 1 && b->children->len == 1 &&
+              (strcmp (a->name, "Exp") == 0 || strcmp (a->name, "exp") == 0) &&
+              (strcmp (b->name, "Exp") == 0 || strcmp (b->name, "exp") == 0))
+            {
+              M42Node *up = g_ptr_array_steal_index (a->children, 0);
+              M42Node *down = g_ptr_array_steal_index (b->children, 0);
+              g_autoptr (M42Node) sum = m42_node_binary (M42_TOK_PLUS, up, down);
+              /* The powers are gathered as a sum is gathered, so that
+               * -x - x + 2 x is nothing rather than three terms. */
+              g_autoptr (M42Node) gathered = m42_node_expand (sum);
+              M42Node *both = m42_node_call1 (a->name, m42_node_copy (gathered));
+
+              m42_node_free (a);
+              m42_node_free (b);
+              return simplify_and_free (both);
+            }
           if (is_num (a, 0) || is_num (b, 0))
             {
               m42_node_free (a);
@@ -858,6 +1024,23 @@ m42_node_simplify (const M42Node *n)
                                  e == 1 ? a : m42_node_binary (M42_TOK_CARET, a,
                                                                m42_node_number (e))));
             }
+          /* An exponential to a power multiplies what it is raising:
+           * Exp[-x]^2 is Exp[-2 x], which is what lets it meet the
+           * Exp[2 x] beside it and come to one. */
+          if (a->kind == M42_NODE_CALL && a->children->len == 1 &&
+              (strcmp (a->name, "Exp") == 0 || strcmp (a->name, "exp") == 0) &&
+              is_number (b))
+            {
+              M42Node *inside = g_ptr_array_steal_index (a->children, 0);
+              g_autoptr (M42Node) times =
+                m42_node_binary (M42_TOK_STAR, m42_node_number (b->number), inside);
+              g_autoptr (M42Node) gathered = m42_node_expand (times);
+              M42Node *raised = m42_node_call1 (a->name, m42_node_copy (gathered));
+
+              m42_node_free (a);
+              m42_node_free (b);
+              return simplify_and_free (raised);
+            }
           /* A minus sign under an even power goes away, and under an
            * odd one comes out in front: (-u)^2 is u^2 and (-u)^3 is
            * -(u^3). */
@@ -898,6 +1081,44 @@ m42_node_simplify (const M42Node *n)
   r->name = g_strdup (n->name);
   for (guint i = 0; i < n->children->len; i++)
     g_ptr_array_add (r->children, m42_node_simplify (m42_node_child (n, i)));
+
+  /* Cos[-u] is Cos[u] and Sin[-u] is -Sin[u]: the minus a difference
+   * of angles is written with does not belong inside the wave.  It is
+   * what turns Cos[x - 2 x] into Cos[x]. */
+  if (r->kind == M42_NODE_CALL && r->children->len == 1)
+    {
+      static const char *const EVEN[] = { "Cos", "cos", "Cosh", "cosh", "Sec", "sec" };
+      static const char *const ODD[] = { "Sin", "sin", "Sinh", "sinh", "Tan", "tan",
+                                         "Tanh", "tanh", "Csc", "csc", "Cot", "cot" };
+      const M42Node *inside = m42_node_child (r, 0);
+      const M42Node *under = NULL;
+      gboolean even = FALSE, odd = FALSE;
+
+      /* A minus in front, or a number that is one. */
+      if (inside->kind == M42_NODE_UNARY && inside->op == M42_TOK_MINUS)
+        under = m42_node_child (inside, 0);
+      for (guint i = 0; i < G_N_ELEMENTS (EVEN); i++)
+        if (strcmp (r->name, EVEN[i]) == 0)
+          even = TRUE;
+      for (guint i = 0; i < G_N_ELEMENTS (ODD); i++)
+        if (strcmp (r->name, ODD[i]) == 0)
+          odd = TRUE;
+
+      if (under != NULL && (even || odd))
+        {
+          M42Node *turned = m42_node_call1 (r->name, m42_node_copy (under));
+
+          if (odd)
+            {
+              M42Node *minus = m42_node_unary (M42_TOK_MINUS, turned);
+
+              m42_node_free (r);
+              return minus;
+            }
+          m42_node_free (r);
+          return turned;
+        }
+    }
 
   /* Exp and Log undo one another, which is the step every integrating
    * factor takes: Exp[Log[x]] is x. */
@@ -1154,6 +1375,20 @@ m42_node_differentiate (const M42Node *n, const char *var)
       }
 
     case M42_NODE_CALL:
+      /* The theorem the whole of the calculus is named after: what is
+       * integrated and then differentiated is what it started as.  It
+       * is worth knowing even when the integral itself was one math42
+       * could not do, which is exactly when it is left standing. */
+      if (n->children->len == 2 &&
+          (strcmp (n->name, "Integrate") == 0 || strcmp (n->name, "integrate") == 0 ||
+           strcmp (n->name, "int") == 0))
+        {
+          const M42Node *over = m42_node_child (n, 1);
+
+          if (over->kind == M42_NODE_IDENT && strcmp (over->name, var) == 0)
+            return CP (m42_node_child (n, 0));
+          return NULL;
+        }
       if (n->children->len == 1)
         {
           const M42Node *u = m42_node_child (n, 0);
@@ -1508,6 +1743,39 @@ integrate_product (const M42Node *a, const M42Node *b, const char *var, int dept
  * the two substitution patterns that carry most of the rest:
  * f'/f and f^n f'.
  */
+
+/* The value of an exponent, whether it stands as 2, as 3/2, or as
+ * -1/2.  A fraction is left as two nodes so that it prints as the
+ * fraction it is, which is why asking for ->number is not enough: it
+ * is what made Integrate[(x + 1)^(3/2), x] come back untouched while
+ * Integrate[Sqrt[x + 1], x] came out. */
+static gboolean
+power_number (const M42Node *n, double *out)
+{
+  if (n->kind == M42_NODE_NUMBER)
+    {
+      *out = n->number;
+      return TRUE;
+    }
+  if (n->kind == M42_NODE_UNARY && n->op == M42_TOK_MINUS)
+    {
+      double inner;
+
+      if (!power_number (m42_node_child (n, 0), &inner))
+        return FALSE;
+      *out = -inner;
+      return TRUE;
+    }
+  if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_SLASH &&
+      m42_node_child (n, 0)->kind == M42_NODE_NUMBER &&
+      m42_node_child (n, 1)->kind == M42_NODE_NUMBER &&
+      m42_node_child (n, 1)->number != 0)
+    {
+      *out = m42_node_child (n, 0)->number / m42_node_child (n, 1)->number;
+      return TRUE;
+    }
+  return FALSE;
+}
 
 /* A number as a node, written as a fraction when it is a simple one,
  * so that an integral reads ArcTan[x/2]/2 and not 0.5 ArcTan[x/2]. */
@@ -2141,6 +2409,64 @@ trig_power_in_u (int which, int k, const M42Node *u)
   }
 }
 
+/* Which wave a node is, and what is inside it: 1 for a sine, 2 for a
+ * cosine, 0 for anything else. */
+static int
+wave_kind (const M42Node *n, const M42Node **inside)
+{
+  if (n->kind != M42_NODE_CALL || n->children->len != 1)
+    return 0;
+  *inside = m42_node_child (n, 0);
+  if (!strcmp (n->name, "Sin") || !strcmp (n->name, "sin"))
+    return 1;
+  if (!strcmp (n->name, "Cos") || !strcmp (n->name, "cos"))
+    return 2;
+  return 0;
+}
+
+static M42Node *
+integrate_wave_product (const M42Node *a, const M42Node *b, const char *var, int depth)
+{
+  const M42Node *u = NULL, *v = NULL;
+  int first = wave_kind (a, &u), second = wave_kind (b, &v);
+  double ua, ub, va, vb;
+  M42Node *sum, *answer;
+
+  if (first == 0 || second == 0)
+    return NULL;
+  /* Both insides have to be lines in the variable, or the sum and the
+   * difference below are not lines either. */
+  if (!linear_coeffs (u, var, &ua, &ub) || !linear_coeffs (v, var, &va, &vb))
+    return NULL;
+  if (fabs (ua) < 1e-14 || fabs (va) < 1e-14)
+    return NULL;
+
+  {
+    g_autoptr (M42Node) raw_plus = ADD (CP (u), CP (v));
+    g_autoptr (M42Node) raw_minus = SUB (CP (u), CP (v));
+    /* 2 x + x is written 3 x, not left as it was built. */
+    g_autoptr (M42Node) plus = m42_node_expand (raw_plus);
+    g_autoptr (M42Node) minus = m42_node_expand (raw_minus);
+
+    if (first == 1 && second == 1)
+      sum = DIV (SUB (CALL ("Cos", CP (minus)), CALL ("Cos", CP (plus))), NUM (2));
+    else if (first == 2 && second == 2)
+      sum = DIV (ADD (CALL ("Cos", CP (minus)), CALL ("Cos", CP (plus))), NUM (2));
+    else if (first == 1)
+      sum = DIV (ADD (CALL ("Sin", CP (plus)), CALL ("Sin", CP (minus))), NUM (2));
+    else
+      {
+        g_autoptr (M42Node) raw_other = SUB (CP (v), CP (u));
+        g_autoptr (M42Node) other = m42_node_expand (raw_other);
+
+        sum = DIV (ADD (CALL ("Sin", CP (plus)), CALL ("Sin", CP (other))), NUM (2));
+      }
+  }
+  answer = integrate_node (sum, var, depth + 1);
+  m42_node_free (sum);
+  return answer;
+}
+
 static M42Node *
 integrate_trig_power (const M42Node *base, double power, const char *var)
 {
@@ -2463,6 +2789,10 @@ integrate_node (const M42Node *n, const char *var, int depth)
             {
               M42Node *r = integrate_exp_times_trig (a, b, var);
 
+              /* Two waves multiplied are two waves added, which the
+               * rules above take one at a time. */
+              if (r == NULL)
+                r = integrate_wave_product (a, b, var, depth);
               if (r == NULL)
                 r = integrate_by_pattern (n, var, depth);
               if (r == NULL)
@@ -2535,25 +2865,30 @@ integrate_node (const M42Node *n, const char *var, int depth)
             return NULL;
 
           case M42_TOK_CARET:
-            /* Sin[a x]^2 and Cos[a x]^2 through the double angle, and
-             * any other whole power by the reduction. */
-            if (b->kind == M42_NODE_NUMBER)
-              {
-                M42Node *r = integrate_trig_square (a, b->number, var);
+            {
+              double k;
 
-                if (r == NULL)
-                  r = integrate_trig_power (a, b->number, var);
-                if (r != NULL)
-                  return r;
-              }
-            /* (a x + b)^k */
-            if (b->kind == M42_NODE_NUMBER && linear_coeffs (a, var, &la, &lb) && la != 0)
-              {
-                double k = b->number;
-                if (k == -1)
-                  return DIV (CALL ("Log", CALL ("Abs", CP (a))), NUM (la));
-                return DIV (POW (CP (a), NUM (k + 1)), NUM (la * (k + 1)));
-              }
+              /* Sin[a x]^2 and Cos[a x]^2 through the double angle, and
+               * any other whole power by the reduction. */
+              if (power_number (b, &k))
+                {
+                  M42Node *r = integrate_trig_square (a, k, var);
+
+                  if (r == NULL)
+                    r = integrate_trig_power (a, k, var);
+                  if (r != NULL)
+                    return r;
+                }
+              /* (a x + b)^k, for any k at all: a square root is the
+               * case k = 1/2 and nothing about it is special. */
+              if (power_number (b, &k) && linear_coeffs (a, var, &la, &lb) && la != 0)
+                {
+                  if (k == -1)
+                    return DIV (CALL ("Log", CALL ("Abs", CP (a))), NUM (la));
+                  return DIV (POW (CP (a), number_node (k + 1)),
+                              number_node (la * (k + 1)));
+                }
+            }
             /* c^(a x + b) */
             if (!m42_node_depends_on (a, var) && linear_coeffs (b, var, &la, &lb) && la != 0)
               return DIV (POW (CP (a), CP (b)), MUL (NUM (la), CALL ("Log", CP (a))));

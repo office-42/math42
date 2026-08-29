@@ -422,7 +422,7 @@ spelling. Where two names are given, either will do.
 | `Limit[f, x -> a]` | including `x -> Infinity`; found numerically, and written as the constant when it is one — `Limit[(1 + 1/n)^n, n -> Infinity]` is `E` |
 | `Series[f, {x, a, n}]` | the Taylor polynomial |
 | `NDSolve[f, {x, a, b}, y0]`, `ode45` | solves y′ = f(x, y) by Runge–Kutta |
-| `DSolve[eqn, y, x]` | the linear equations with constant coefficients, exactly |
+| `DSolve[eqn, y, x]` | the linear equations, exactly: a first order one by its integrating factor, a second order one with constant coefficients by variation of parameters |
 | `RSolve[eqn, a, n]` | a linear recurrence, in closed form |
 
 The integration rules are the ones a first course teaches:
@@ -545,10 +545,30 @@ In[d5]:= DSolve[{y' == y^2, y[0] == 1}, y, x]     Out[d5]= -(1/(x - 1))
 In[d6]:= DSolve[y' == Sqrt[y], y, x]              Out[d6]= (x/2 + C1/2)^2
 ```
 
-What is left over — `y' == y^2 + x`, and a second order equation with
-anything but a constant on its right — is not solved, and says so.
- The
-primes are written as Mathematica writes them, and conditions may
+What is left over — `y' == y^2 + x` above all — is not solved, and
+says so.
+
+A second order equation with constant coefficients is solved whatever
+stands on its right, by variation of parameters: the two solutions of
+the homogeneous equation give a Wronskian W, and
+
+    yp = -y1 Integrate[(y2 R)/(a W), x] + y2 Integrate[(y1 R)/(a W), x]
+
+solves the whole of it, so long as math42 can do the two integrals.
+
+```
+In[v1]:= DSolve[y'' + y == Exp[x], y, x]
+Out[v1]= C1 Cos[x] + C2 Sin[x] + Exp[x]/2
+In[v2]:= DSolve[y'' + 4 y == Sin[x], y, x]
+Out[v2]= C1 Cos[2 x] + C2 Sin[2 x] + Sin[x]/3
+In[v3]:= DSolve[y'' + 2 y' + y == Exp[-x], y, x]
+Out[v3]= C1 Exp[-x] + C2 x Exp[-x] + Exp[-x] x^2/2
+```
+
+The second of those comes back from the integrals as four products of
+waves; it is `TrigReduce` that makes `Sin[x]/3` of them.
+
+The primes are written as Mathematica writes them, and conditions may
 follow in the list:
 
 ```
@@ -584,6 +604,8 @@ In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + 1/2 u^2 + 1/6 u^3 + 1/24
 | `Factor[p]` | a polynomial as a product of its factors |
 | `Simplify[e]`, `FullSimplify[e]` | the identities, the cancelling and the multiplying out, whichever comes out shorter |
 | `Cancel[e]` | a fraction with whatever divides both halves taken off |
+| `TrigReduce[e]` | products and powers of waves as a sum of plain waves: `Sin[x] Cos[x]` is `Sin[2 x]/2` |
+| `TrigExpand[e]` | the other way: `Sin[x + y]` is `Sin[x] Cos[y] + Cos[x] Sin[y]`, and `Sin[2 x]` is `2 Sin[x] Cos[x]` |
 | `Solve[lhs == rhs, x]` | every root of a polynomial, complex ones included |
 | `FindRoot[f, {x, x0}]`, `fzero` | one root, from a starting point |
 | `Sum[f, {i, a, b}]`, `Product[…]` | a sum to a named end gets its closed form |
@@ -1064,9 +1086,13 @@ Said plainly, so nothing surprises you:
 - **Symbolic solving.** `Solve` gives a closed form for a line and a
   quadratic with letters for coefficients, and finds the rest of the
   roots numerically — a cubic with letters in it is beyond it. `DSolve`
-  and `RSolve` handle the linear constant-coefficient equations, with a
-  constant of their own on the right, and no others; there is no
-  `Reduce`, no `Assuming`, no partial differential equations, and no
+  handles the linear equations: a first order one by its integrating
+  factor whatever its coefficients are, a second order one with
+  constant coefficients and anything on the right it can integrate
+  twice, and a first order one that separates into a power of `y`.
+  `RSolve` handles a linear recurrence with constant coefficients.
+  Beyond those there is no `Reduce`, no `Assuming`, no system of
+  differential equations, no partial differential equations, and no
   modular arithmetic in an equation.
 - **Symbolic integration beyond the rules listed above.** The special
   functions that are there — `Gamma`, `Beta`, `Erf`, `Erfc`, `Zeta`,

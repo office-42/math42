@@ -43,6 +43,8 @@ static const M42Function FUNCTIONS[] = {
   { "Collect", "collect", "Collect[e, x]", "gathered by the powers of x", "Algebra" },
   { "Together", NULL, "Together[e]", "a sum of fractions written over one denominator", "Algebra" },
   { "Apart", "partfrac", "Apart[e, x]", "a fraction split into partial fractions", "Algebra" },
+  { "TrigReduce", NULL, "TrigReduce[e]", "products and powers of waves as a sum of plain waves", "Algebra" },
+  { "TrigExpand", NULL, "TrigExpand[e]", "Sin[x + y] and Sin[2 x] written out in waves of x and y", "Algebra" },
   { "PolynomialQuotient", "deconv", "PolynomialQuotient[a, b, x]", "the whole part of one polynomial over another", "Algebra" },
   { "PolynomialRemainder", NULL, "PolynomialRemainder[a, b, x]", "what is left over", "Algebra" },
   { "PolynomialGCD", NULL, "PolynomialGCD[a, b, x]", "the greatest common divisor, by Euclid", "Algebra" },
