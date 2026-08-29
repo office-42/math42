@@ -74,6 +74,14 @@ Instructions for AI agents:
     `Total[{1, 2, 3}, 1]` answering 7, `beta` not answering at all, and
     two rows that paired functions which are not the same function.
 
+  - **Nothing should be able to kill it.** Call every name in the table
+    with a dozen shapes of argument — nothing, a number, a negative, a
+    list, a matrix, a string, a symbol, two of each, `1/0` — in small
+    batches, and look for a batch that does not come back or that
+    writes a `CRITICAL` to stderr. Seven thousand nine hundred calls.
+    This found `FixedPoint[x, x]` taking the stack down and `MapThread`
+    asking a number for its length.
+
   Put a wrong check in on purpose first and watch it fail, or the sweep
   is only telling you what you want to hear.
 - To look at a change without a person at the keyboard:

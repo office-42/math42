@@ -7611,6 +7611,17 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
                   m42_value_unref (next);
                   break;
                 }
+              /* Growing rather than settling: FixedPoint[x, x] builds
+               * x[x[x[...]]] for ever, and ten thousand of those is
+               * deep enough to take the stack down when it is printed.
+               * Something this large is not on its way anywhere. */
+              if (strlen (now) > 20000)
+                {
+                  m42_value_unref (next);
+                  m42_value_unref (acc);
+                  m42_value_unref (out);
+                  return m42_value_error ("%s: that is growing, not settling", name);
+                }
             }
           m42_value_unref (acc);
           acc = next;
@@ -8289,16 +8300,21 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
     {
       /* f applied across the lists, one item from each at a time. */
       guint lists = m42_value_list_length (ARG (1));
-      guint n = m42_value_list_length (m42_value_list_nth (ARG (1), 0));
-      M42Value *out = m42_value_list_new ();
+      guint n;
+      M42Value *out;
 
+      /* Every one of them has to be a list before its length can be
+       * asked for.  This used to ask the first one for its length
+       * before looking, so MapThread[f, {3, 4}] walked into the
+       * length of the number 3. */
       for (guint k = 0; k < lists; k++)
-        if (m42_value_list_nth (ARG (1), k)->kind != M42_VALUE_LIST ||
-            m42_value_list_length (m42_value_list_nth (ARG (1), k)) != n)
-          {
-            m42_value_unref (out);
-            return m42_value_error ("MapThread wants lists of the same length");
-          }
+        if (m42_value_list_nth (ARG (1), k)->kind != M42_VALUE_LIST)
+          return m42_value_error ("MapThread wants a list of lists");
+      n = m42_value_list_length (m42_value_list_nth (ARG (1), 0));
+      for (guint k = 1; k < lists; k++)
+        if (m42_value_list_length (m42_value_list_nth (ARG (1), k)) != n)
+          return m42_value_error ("MapThread wants lists of the same length");
+      out = m42_value_list_new ();
 
       for (guint i = 0; i < n; i++)
         {
