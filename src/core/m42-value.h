@@ -61,8 +61,18 @@ typedef struct {
   double  r, g, b;
 } M42Contour;
 
+/* A curve through space: the points it passes through, one after
+ * another, and the box they live in so that it can be scaled to the
+ * room it has. */
+typedef struct {
+  GArray *points;      /* of double: x, y, z, one point after another */
+  double  r, g, b;
+  double  xmin, xmax, ymin, ymax, zmin, zmax;
+} M42Curve3D;
+
 typedef struct {
   GPtrArray *series;   /* of M42Series* */
+  GPtrArray *curves;   /* of M42Curve3D*, when it is a curve through space */
   M42Surface *surface; /* set when this is a graph of two variables */
   GPtrArray *contours; /* of M42Contour*, when it is a contour plot */
   double xmin, xmax, ymin, ymax;
@@ -138,6 +148,9 @@ M42Value *m42_value_string (const char *text);
  * by the caller and its range worked out by m42_surface_autoscale. */
 M42Surface *m42_plot_add_surface (M42Plot *plot, guint nx, guint ny);
 M42Contour *m42_plot_add_contour (M42Plot *plot, double level, guint which, guint of);
+/* A curve through space; its box is worked out as points are added. */
+M42Curve3D *m42_plot_add_curve3d (M42Plot *plot);
+void        m42_curve3d_add_point (M42Curve3D *c, double x, double y, double z);
 void        m42_contour_add_segment (M42Contour *c, double x1, double y1, double x2, double y2);
 void        m42_surface_autoscale (M42Surface *s);
 M42Series *m42_plot_add_series (M42Plot *plot, M42SeriesKind kind);

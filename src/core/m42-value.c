@@ -181,6 +181,7 @@ static void
 plot_free (M42Plot *p)
 {
   g_clear_pointer (&p->contours, g_ptr_array_unref);
+  g_clear_pointer (&p->curves, g_ptr_array_unref);
   if (p->surface != NULL)
     {
       g_free (p->surface->z);
@@ -323,6 +324,43 @@ m42_plot_add_series (M42Plot *plot, M42SeriesKind kind)
   s->r = c[0]; s->g = c[1]; s->b = c[2];
   g_ptr_array_add (plot->series, s);
   return s;
+}
+
+static void
+curve3d_free (M42Curve3D *c)
+{
+  g_array_unref (c->points);
+  g_free (c);
+}
+
+M42Curve3D *
+m42_plot_add_curve3d (M42Plot *plot)
+{
+  M42Curve3D *c = g_new0 (M42Curve3D, 1);
+
+  c->points = g_array_new (FALSE, FALSE, sizeof (double));
+  c->r = 0.20;
+  c->g = 0.40;
+  c->b = 0.75;
+  c->xmin = c->ymin = c->zmin = INFINITY;
+  c->xmax = c->ymax = c->zmax = -INFINITY;
+  if (plot->curves == NULL)
+    plot->curves = g_ptr_array_new_with_free_func ((GDestroyNotify) curve3d_free);
+  g_ptr_array_add (plot->curves, c);
+  return c;
+}
+
+void
+m42_curve3d_add_point (M42Curve3D *c, double x, double y, double z)
+{
+  double xyz[3] = { x, y, z };
+
+  if (!isfinite (x) || !isfinite (y) || !isfinite (z))
+    return;
+  g_array_append_vals (c->points, xyz, 3);
+  c->xmin = MIN (c->xmin, x);  c->xmax = MAX (c->xmax, x);
+  c->ymin = MIN (c->ymin, y);  c->ymax = MAX (c->ymax, y);
+  c->zmin = MIN (c->zmin, z);  c->zmax = MAX (c->zmax, z);
 }
 
 /* A contour, coloured by where its level falls among the others. */

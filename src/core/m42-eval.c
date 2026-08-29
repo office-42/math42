@@ -5623,6 +5623,67 @@ plot3d (M42Session *s, const M42Node *call, gboolean flat)
   return out;
 }
 
+/* ParametricPlot3D[{fx, fy, fz}, {t, a, b}]: where a point goes as t
+ * runs, drawn in the same projection the surfaces use. */
+static M42Value *
+parametric_plot3d (M42Session *s, const M42Node *call)
+{
+  const M42Node *parts, *spec;
+  const char *var;
+  double t0, t1;
+  M42Value *err, *out;
+  M42Curve3D *curve;
+  const guint n = 600;
+
+  if (call->children->len < 2)
+    return m42_value_error ("ParametricPlot3D expects {x, y, z} and {t, a, b}");
+  parts = m42_node_child (call, 0);
+  spec = m42_node_child (call, 1);
+  if (parts->kind != M42_NODE_LIST || parts->children->len != 3)
+    return m42_value_error ("ParametricPlot3D expects three expressions in a list");
+  if (spec->kind != M42_NODE_LIST || spec->children->len != 3 ||
+      m42_node_child (spec, 0)->kind != M42_NODE_IDENT)
+    return m42_value_error ("ParametricPlot3D expects {t, a, b}");
+  var = m42_node_child (spec, 0)->name;
+  {
+    g_autoptr (M42Value) a = eval (s, m42_node_child (spec, 1));
+    g_autoptr (M42Value) b = eval (s, m42_node_child (spec, 2));
+
+    if (!need_number (a, "ParametricPlot3D", &t0, &err) ||
+        !need_number (b, "ParametricPlot3D", &t1, &err))
+      return err;
+  }
+  if (!(t1 > t0))
+    return m42_value_error ("ParametricPlot3D: the second end must be past the first");
+
+  out = m42_value_plot_new ();
+  curve = m42_plot_add_curve3d (out->u.plot);
+  for (guint i = 0; i < n; i++)
+    {
+      double t = t0 + (t1 - t0) * i / (double) (n - 1);
+      double x = number_at (s, m42_node_child (parts, 0), var, t);
+      double y = number_at (s, m42_node_child (parts, 1), var, t);
+      double z = number_at (s, m42_node_child (parts, 2), var, t);
+
+      m42_curve3d_add_point (curve, x, y, z);
+    }
+  if (curve->points->len < 6)
+    {
+      m42_value_unref (out);
+      return m42_value_error ("ParametricPlot3D: nothing came of that");
+    }
+  {
+    M42Value *bad = plot_options (s, call, 2, out->u.plot);
+
+    if (bad != NULL)
+      {
+        m42_value_unref (out);
+        return bad;
+      }
+  }
+  return out;
+}
+
 /* ListPlot3D, ListContourPlot and ListDensityPlot: the same three
  * pictures, but handed the grid of heights instead of a function to
  * work one out from.  The places run 1, 2, 3 across and down, as they
@@ -11251,6 +11312,9 @@ eval_call (M42Session *s, const M42Node *n)
   if (name_is (name, "LogLogPlot", "loglog")) return plot (s, n, TRUE, TRUE);
   if (name_is (name, "ContourPlot", "contour")) return contour_plot (s, n);
   if (name_is (name, "ParametricPlot", NULL)) return parametric_plot (s, n, FALSE);
+  if (name_is (name, "ParametricPlot3D", NULL))
+    return parametric_plot3d (s, n);
+
   if (name_is (name, "ListPlot3D", NULL) || name_is (name, "ListContourPlot", NULL) ||
       name_is (name, "ListDensityPlot", NULL))
     {

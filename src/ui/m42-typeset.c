@@ -807,8 +807,14 @@ nice_step (double span)
  * and outlined so the mesh shows.
  */
 
-#define VIEW_YAW   0.62      /* radians the box is turned */
-#define VIEW_TILT  0.52      /* radians it is tilted forward */
+/* Which way the box is looked at.  The pair matters more than it
+ * looks: at a yaw of 0.62 and a tilt of 0.52 the eye lies almost
+ * exactly in the plane z = x, so anything flat in that plane -- the
+ * surface z = x, or the curve {Sin[t], Cos[t], Sin[t]} -- is seen
+ * edge on and drawn as a line.  These two are well clear of that
+ * plane and of z = y. */
+#define VIEW_YAW   0.70      /* radians the box is turned */
+#define VIEW_TILT  0.40      /* radians it is tilted forward */
 
 /* A number cut down to a few figures, so that an axis says 3 and not
  * 2.99999999999999. */
@@ -869,6 +875,73 @@ height_colour (double t, double *r, double *g, double *b)
   *r = from[0] + (to[0] - from[0]) * u;
   *g = from[1] + (to[1] - from[1]) * u;
   *b = from[2] + (to[2] - from[2]) * u;
+}
+
+/* A curve through space, drawn in the same projection the surfaces
+ * use: the box it lives in is squashed to the cube from -1 to 1 so
+ * that whatever it is made of fills the room it has, and a floor is
+ * laid under it to say which way is down. */
+static void
+draw_curve3d (const M42Plot *p, cairo_t *cr, double x0, double y0, double w, double h)
+{
+  double scale, cx, cy;
+  double minx = 1e30, maxx = -1e30, miny = 1e30, maxy = -1e30;
+
+  for (int i = 0; i < 8; i++)
+    {
+      double px, py;
+
+      project (i & 1 ? 1 : -1, i & 2 ? 1 : -1, i & 4 ? 1 : -1, &px, &py);
+      minx = MIN (minx, px); maxx = MAX (maxx, px);
+      miny = MIN (miny, py); maxy = MAX (maxy, py);
+    }
+  scale = MIN (w / (maxx - minx), h / (maxy - miny)) * 0.94;
+  cx = x0 + w / 2 - (minx + maxx) / 2 * scale;
+  cy = y0 + h / 2 - (miny + maxy) / 2 * scale;
+
+  {
+    double px[4], py[4];
+
+    project (-1, -1, -1, &px[0], &py[0]);
+    project (1, -1, -1, &px[1], &py[1]);
+    project (1, 1, -1, &px[2], &py[2]);
+    project (-1, 1, -1, &px[3], &py[3]);
+    cairo_set_source_rgb (cr, 0.96, 0.96, 0.97);
+    cairo_move_to (cr, cx + px[0] * scale, cy + py[0] * scale);
+    for (int k = 1; k < 4; k++)
+      cairo_line_to (cr, cx + px[k] * scale, cy + py[k] * scale);
+    cairo_close_path (cr);
+    cairo_fill_preserve (cr);
+    cairo_set_source_rgb (cr, 0.75, 0.75, 0.78);
+    cairo_set_line_width (cr, 1);
+    cairo_stroke (cr);
+  }
+
+  for (guint c = 0; c < p->curves->len; c++)
+    {
+      const M42Curve3D *curve = g_ptr_array_index (p->curves, c);
+      guint n = curve->points->len / 3;
+      double sx = curve->xmax > curve->xmin ? 2 / (curve->xmax - curve->xmin) : 0;
+      double sy = curve->ymax > curve->ymin ? 2 / (curve->ymax - curve->ymin) : 0;
+      double sz = curve->zmax > curve->zmin ? 2 / (curve->zmax - curve->zmin) : 0;
+
+      cairo_set_line_width (cr, 1.6);
+      for (guint i = 0; i < n; i++)
+        {
+          const double *at = &g_array_index (curve->points, double, i * 3);
+          double x = -1 + (at[0] - curve->xmin) * sx;
+          double y = -1 + (at[1] - curve->ymin) * sy;
+          double z = -1 + (at[2] - curve->zmin) * sz;
+          double px, py;
+
+          project (x, y, z, &px, &py);
+          if (i == 0)
+            cairo_move_to (cr, cx + px * scale, cy + py * scale);
+          else
+            cairo_line_to (cr, cx + px * scale, cy + py * scale);
+        }
+      cairo_stroke (cr);
+    }
 }
 
 static void
@@ -1163,6 +1236,15 @@ draw_plot (const M42Box *b, cairo_t *cr, double x0, double y0)
   cairo_set_source_rgb (cr, 1, 1, 1);
   cairo_rectangle (cr, L, T, w, h);
   cairo_fill (cr);
+
+  /* A curve through space is drawn in the projection too. */
+  if (p->curves != NULL && p->curves->len > 0)
+    {
+      draw_curve3d (p, cr, 8, T + 2, PLOT_W - 16, h - 6);
+      pango_font_description_free (desc);
+      cairo_restore (cr);
+      return;
+    }
 
   /* A graph of two variables is a different picture altogether --
    * unless it is looked straight down on, which wants the axes and the
