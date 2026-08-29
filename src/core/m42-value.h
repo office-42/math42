@@ -73,6 +73,10 @@ typedef struct {
 typedef struct {
   GPtrArray *series;   /* of M42Series* */
   GPtrArray *curves;   /* of M42Curve3D*, when it is a curve through space */
+  /* A field of arrows: x, y, dx, dy and how long the arrow was before
+   * it was cut down to fit, four and a bit doubles at a time.  What is
+   * drawn is the direction; the length says how strong. */
+  GArray    *arrows;
   M42Surface *surface; /* set when this is a graph of two variables */
   GPtrArray *contours; /* of M42Contour*, when it is a contour plot */
   double xmin, xmax, ymin, ymax;
@@ -150,6 +154,10 @@ M42Surface *m42_plot_add_surface (M42Plot *plot, guint nx, guint ny);
 M42Contour *m42_plot_add_contour (M42Plot *plot, double level, guint which, guint of);
 /* A curve through space; its box is worked out as points are added. */
 M42Curve3D *m42_plot_add_curve3d (M42Plot *plot);
+/* One arrow of a field: where it starts, which way it goes once it has
+ * been cut down to fit, and how strong it was, from 0 to 1. */
+void        m42_plot_add_arrow (M42Plot *plot, double x, double y,
+                                double dx, double dy, double strength);
 void        m42_curve3d_add_point (M42Curve3D *c, double x, double y, double z);
 void        m42_contour_add_segment (M42Contour *c, double x1, double y1, double x2, double y2);
 void        m42_surface_autoscale (M42Surface *s);

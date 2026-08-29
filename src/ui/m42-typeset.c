@@ -1274,6 +1274,47 @@ draw_plot (const M42Box *b, cairo_t *cr, double x0, double y0)
   if (p->surface != NULL && p->surface->flat)
     draw_surface (p, cr, L, T, w, h);
 
+  /* A field of arrows, drawn where the points of a graph would go:
+   * a line each way it points with a head on the end, dark where the
+   * field is strong and pale where it is weak. */
+  if (p->arrows != NULL)
+    for (guint i = 0; i + 4 < p->arrows->len; i += 5)
+      {
+        const double *a = &g_array_index (p->arrows, double, i);
+        double px = L + (a[0] - p->xmin) * sx;
+        double py = T + h - (a[1] - p->ymin) * sy;
+        double qx = L + (a[0] + a[2] - p->xmin) * sx;
+        double qy = T + h - (a[1] + a[3] - p->ymin) * sy;
+        double dx = qx - px, dy = qy - py;
+        double len = hypot (dx, dy);
+        double head = MIN (len * 0.42, 5.0);
+        double strength = a[4];
+
+        if (len < 0.6)
+          continue;
+        cairo_set_source_rgb (cr, 0.20 + 0.45 * (1 - strength),
+                              0.35 + 0.40 * (1 - strength),
+                              0.70 - 0.10 * strength);
+        cairo_set_line_width (cr, 1.1);
+        cairo_move_to (cr, px, py);
+        cairo_line_to (cr, qx, qy);
+        cairo_stroke (cr);
+
+        /* The head: two short strokes back from the point. */
+        {
+          double ux = dx / len, uy = dy / len;
+          double nx = -uy, ny = ux;
+
+          cairo_move_to (cr, qx, qy);
+          cairo_line_to (cr, qx - ux * head + nx * head * 0.5,
+                             qy - uy * head + ny * head * 0.5);
+          cairo_move_to (cr, qx, qy);
+          cairo_line_to (cr, qx - ux * head - nx * head * 0.5,
+                             qy - uy * head - ny * head * 0.5);
+          cairo_stroke (cr);
+        }
+      }
+
   label = pango_cairo_create_layout (cr);
   pango_layout_set_font_description (label, desc);
 

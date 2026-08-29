@@ -153,7 +153,8 @@ and `AllTrue`.
 projection with its mesh and a colour taken from its height,
 `ParametricPlot`, `PolarPlot`,
 `ContourPlot`/`contour` for the curves along which a function keeps its
-value, `ParametricPlot3D` for a curve through space,
+value, `ParametricPlot3D` for a curve through space, `VectorPlot`/`quiver`
+for a direction field,
 `DensityPlot` for the same surface looked straight down on,
 `ListPlot3D`, `ListContourPlot` and `ListDensityPlot` for those three
 from a grid of numbers, `LogPlot`/`semilogy` and `LogLogPlot`/`loglog` for an axis in

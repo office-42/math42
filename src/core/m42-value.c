@@ -182,6 +182,7 @@ plot_free (M42Plot *p)
 {
   g_clear_pointer (&p->contours, g_ptr_array_unref);
   g_clear_pointer (&p->curves, g_ptr_array_unref);
+  g_clear_pointer (&p->arrows, g_array_unref);
   if (p->surface != NULL)
     {
       g_free (p->surface->z);
@@ -324,6 +325,17 @@ m42_plot_add_series (M42Plot *plot, M42SeriesKind kind)
   s->r = c[0]; s->g = c[1]; s->b = c[2];
   g_ptr_array_add (plot->series, s);
   return s;
+}
+
+void
+m42_plot_add_arrow (M42Plot *plot, double x, double y, double dx, double dy,
+                    double strength)
+{
+  double one[5] = { x, y, dx, dy, strength };
+
+  if (plot->arrows == NULL)
+    plot->arrows = g_array_new (FALSE, FALSE, sizeof (double));
+  g_array_append_vals (plot->arrows, one, 5);
 }
 
 static void

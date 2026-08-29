@@ -5623,6 +5623,108 @@ plot3d (M42Session *s, const M42Node *call, gboolean flat)
   return out;
 }
 
+/* VectorPlot[{fx, fy}, {x, a, b}, {y, c, d}]: which way a field points
+ * at each place on a grid, which is what a direction field is.  Every
+ * arrow is drawn the same length but for a little, so that the picture
+ * says which way rather than how far -- how far is said by the colour
+ * and by a shorter arrow where the field is weak.
+ */
+static M42Value *
+vector_plot (M42Session *s, const M42Node *call)
+{
+  const M42Node *parts, *xs, *ys;
+  const char *xvar, *yvar;
+  double x0, x1, y0, y1;
+  M42Value *err, *out;
+  M42Plot *p;
+  const guint n = 17;
+  g_autofree double *dx = NULL;
+  g_autofree double *dy = NULL;
+  double longest = 0;
+
+  if (call->children->len < 3)
+    return m42_value_error ("VectorPlot expects {p, q}, {x, a, b} and {y, c, d}");
+  parts = m42_node_child (call, 0);
+  xs = m42_node_child (call, 1);
+  ys = m42_node_child (call, 2);
+  if (parts->kind != M42_NODE_LIST || parts->children->len != 2)
+    return m42_value_error ("VectorPlot expects two expressions in a list");
+  if (xs->kind != M42_NODE_LIST || xs->children->len != 3 ||
+      ys->kind != M42_NODE_LIST || ys->children->len != 3 ||
+      m42_node_child (xs, 0)->kind != M42_NODE_IDENT ||
+      m42_node_child (ys, 0)->kind != M42_NODE_IDENT)
+    return m42_value_error ("VectorPlot expects {x, a, b} and {y, c, d}");
+  xvar = m42_node_child (xs, 0)->name;
+  yvar = m42_node_child (ys, 0)->name;
+  {
+    g_autoptr (M42Value) a = eval (s, m42_node_child (xs, 1));
+    g_autoptr (M42Value) b = eval (s, m42_node_child (xs, 2));
+    g_autoptr (M42Value) c = eval (s, m42_node_child (ys, 1));
+    g_autoptr (M42Value) d = eval (s, m42_node_child (ys, 2));
+
+    if (!need_number (a, "VectorPlot", &x0, &err) || !need_number (b, "VectorPlot", &x1, &err) ||
+        !need_number (c, "VectorPlot", &y0, &err) || !need_number (d, "VectorPlot", &y1, &err))
+      return err;
+  }
+
+  dx = g_new (double, n * n);
+  dy = g_new (double, n * n);
+  for (guint i = 0; i < n; i++)
+    for (guint j = 0; j < n; j++)
+      {
+        double x = x0 + (x1 - x0) * i / (double) (n - 1);
+        double y = y0 + (y1 - y0) * j / (double) (n - 1);
+        double u = number_at2 (s, m42_node_child (parts, 0), xvar, x, yvar, y);
+        double v = number_at2 (s, m42_node_child (parts, 1), xvar, x, yvar, y);
+
+        dx[i * n + j] = u;
+        dy[i * n + j] = v;
+        if (isfinite (u) && isfinite (v))
+          longest = MAX (longest, hypot (u, v));
+      }
+  if (longest <= 0)
+    return m42_value_error ("VectorPlot: the field is nothing everywhere");
+
+  out = m42_value_plot_new ();
+  p = out->u.plot;
+  p->xmin = x0;
+  p->xmax = x1;
+  p->ymin = y0;
+  p->ymax = y1;
+  p->xlabel = g_strdup (xvar);
+  p->ylabel = g_strdup (yvar);
+
+  for (guint i = 0; i < n; i++)
+    for (guint j = 0; j < n; j++)
+      {
+        double u = dx[i * n + j], v = dy[i * n + j];
+        double x = x0 + (x1 - x0) * i / (double) (n - 1);
+        double y = y0 + (y1 - y0) * j / (double) (n - 1);
+        double len = hypot (u, v);
+        double strength = len / longest;
+        double step = MIN ((x1 - x0), (y1 - y0)) / (n - 1);
+        double want;
+
+        if (!isfinite (u) || !isfinite (v) || len == 0)
+          continue;
+        /* Long enough to see which way it points, and a little longer
+         * where the field is stronger -- but never long enough to run
+         * into the next arrow. */
+        want = step * 0.85 * (0.45 + 0.55 * sqrt (strength));
+        m42_plot_add_arrow (p, x, y, u / len * want, v / len * want, strength);
+      }
+  {
+    M42Value *bad = plot_options (s, call, 3, p);
+
+    if (bad != NULL)
+      {
+        m42_value_unref (out);
+        return bad;
+      }
+  }
+  return out;
+}
+
 /* ParametricPlot3D[{fx, fy, fz}, {t, a, b}]: where a point goes as t
  * runs, drawn in the same projection the surfaces use. */
 static M42Value *
@@ -11314,6 +11416,12 @@ eval_call (M42Session *s, const M42Node *n)
   if (name_is (name, "ParametricPlot", NULL)) return parametric_plot (s, n, FALSE);
   if (name_is (name, "ParametricPlot3D", NULL))
     return parametric_plot3d (s, n);
+
+  /* quiver is MATLAB's name for the same picture.  StreamPlot is not:
+   * it draws the lines a flow follows, not the arrows at each place,
+   * and math42 does not have it. */
+  if (name_is (name, "VectorPlot", "quiver"))
+    return vector_plot (s, n);
 
   if (name_is (name, "ListPlot3D", NULL) || name_is (name, "ListContourPlot", NULL) ||
       name_is (name, "ListDensityPlot", NULL))
