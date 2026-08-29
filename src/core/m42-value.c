@@ -412,6 +412,10 @@ m42_plot_add_surface (M42Plot *plot, guint nx, guint ny)
   s->nx = nx;
   s->ny = ny;
   s->z = g_new0 (double, (gsize) nx * ny);
+  /* A second surface on the same plot replaces the first, whose grid
+   * has to go with it. */
+  if (plot->surface != NULL)
+    g_free (plot->surface->z);
   g_free (plot->surface);
   plot->surface = s;
   return s;

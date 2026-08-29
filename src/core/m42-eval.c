@@ -7929,10 +7929,7 @@ region_plot (M42Session *s, const M42Node *call)
   p->xlabel = g_strdup (xvar);
   p->ylabel = g_strdup (yvar);
 
-  face = g_new0 (M42Surface, 1);
-  face->nx = n;
-  face->ny = n;
-  face->z = g_new (double, (gsize) n * n);
+  face = m42_plot_add_surface (p, n, n);
   face->xmin = x0;
   face->xmax = x1;
   face->ymin = y0;
@@ -7957,7 +7954,6 @@ region_plot (M42Session *s, const M42Node *call)
         else
           face->z[i * n + j] = NAN;
       }
-  p->surface = face;
   if (inside == 0)
     {
       m42_value_unref (out);
