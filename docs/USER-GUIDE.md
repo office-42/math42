@@ -110,8 +110,9 @@ chosen by the ending you give:
 
 A MATLAB script needs a little translating, and gets it: `%` comments
 become `(* … *)` on the way in and `%` again on the way out, since `%`
-means the previous output here; a line ending in `...` is joined to the
-next; and `'single quotes'` become `"double"` ones, while `A'` stays
+means the previous output here; a block fenced by `%{` and `%}` on
+lines of their own is passed over entirely; a line ending in `...` is
+joined to the next; and `'single quotes'` become `"double"` ones, while `A'` stays
 the transpose it is — and so does the second `'` of `y''`, which is how
 a second derivative is written. An apostrophe inside a string is kept:
 MATLAB's `'it''s'` is read as `"it's"`, and a `'` inside a
@@ -127,6 +128,10 @@ the notebook it started as. Input typed in Mathematica's own
 two-dimensional way is read as what it means: `SuperscriptBox["x", "2"]`
 is `x^2`, a `FractionBox` is a fraction, a `SqrtBox` a root, and an
 input and its output inside one `CellGroupData` are two cells, not one.
+The characters Mathematica writes by name are read as what they mean —
+`\[Rule]` is `->`, `\[Equal]` is `==`, `\[LessEqual]` is `<=` — and a
+name math42 has no spelling for, a Greek letter among them, is left as
+it stands, so that it is complained about rather than quietly misread.
 
 **MATLAB's own `.mat` files.** `Import["run.mat"]` reads the variables
 of a MATLAB session and `Export["run.mat", m]` writes them, under
