@@ -606,6 +606,8 @@ In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + 1/2 u^2 + 1/6 u^3 + 1/24
 | `Cancel[e]` | a fraction with whatever divides both halves taken off |
 | `TrigReduce[e]` | products and powers of waves as a sum of plain waves: `Sin[x] Cos[x]` is `Sin[2 x]/2` |
 | `TrigExpand[e]` | the other way: `Sin[x + y]` is `Sin[x] Cos[y] + Cos[x] Sin[y]`, and `Sin[2 x]` is `2 Sin[x] Cos[x]` |
+| `TrigToExp[e]`, `ExpToTrig[e]` | waves as exponentials of an imaginary angle, and back |
+| `PowerExpand[e]` | `Log[a b]` as `Log[a] + Log[b]`, taking the letters for positive numbers |
 | `Solve[lhs == rhs, x]` | every root of a polynomial, complex ones included |
 | `Roots[lhs == rhs, x]` | the same, written `x == a || x == b` |
 | `Variables[e]` | the letters in an expression |
@@ -615,7 +617,10 @@ In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + 1/2 u^2 + 1/6 u^3 + 1/24
 | `Sum[f, {i, a, Infinity}]` | a sum with no end: exact for a geometric series and for 1/n^2, 1/n^4, 1/n^6, added up when the terms die away fast, and left alone when they do not |
 | `Solve[{eqs}, {vars}]` | a system, when the equations are linear |
 | `Solve[a x + b == 0, x]` | with letters for coefficients: a line and a quadratic have a closed form |
-| `FindMinimum[f, {x, x0}]` | the bottom of a curve; `FindMaximum` the top |
+| `FindMinimum[f, {x, x0}]` | the bottom of a curve, from a starting point; `FindMaximum` the top |
+| `Minimize[f, x]`, `Maximize[f, x]` | the lowest or highest the function goes anywhere, exactly where it can: `Minimize[x^2 - x, x]` is `{-1/4, {x -> 1/2}}`, and a function that never turns round answers `-Infinity` |
+| `NMinimize[f, x]`, `NMaximize[f, x]` | the same, numerically from the start |
+| `ArgMin[f, x]`, `ArgMax[f, x]` | the place alone; over a list, which one of them it is |
 | `fminbnd(f, a, b)` | the place alone, MATLAB's way |
 | `Coefficient`, `CoefficientList`, `Exponent`, `Collect` | a polynomial taken apart |
 | `Together`, `Apart`, `Cancel` | the two ways of writing a rational function |
@@ -630,6 +635,8 @@ In[28c]:= Solve[x^2 == a, x]           Out[28c]= {{x -> -Sqrt[a]}, {x -> Sqrt[a]
 In[29]:= Sum[i^2, {i, 1, n}]           Out[29]= n/6 + n^2/2 + n^3/3
 In[30]:= Apart[(x + 3)/(x^2 + 3x + 2), x]          Out[30]= -1/(x + 2) + 2/(1 + x)
 In[31]:= FindMinimum[(x - 3)^2 + 1, {x, 0}]        Out[31]= {1, {x -> 3}}
+In[31b]:= Minimize[x^2 - x, x]         Out[31b]= {-1/4, {x -> 1/2}}
+In[31c]:= Maximize[Sin[x], x]          Out[31c]= {1, {x -> 1.5707963267949}}
 In[32]:= Sum[1/2^n, {n, 0, Infinity}]  Out[32]= 2
 In[33]:= Sum[1/n^2, {n, 1, Infinity}]  Out[33]= Pi^2/6
 In[34]:= Limit[(1 + 1/n)^n, n -> Infinity]         Out[34]= E

@@ -482,6 +482,7 @@ static M42Value *lookup (M42Session *s, const char *name);
 static M42Value *interpolation_function (M42Session *s, const M42Value *data);
 static M42Value *import_file (const char *path, const char *what);
 static M42Node *cancel_common_factor (const M42Node *tree);
+static M42Value *solve (M42Session *s, const M42Node *call);
 static gboolean pattern_test (const M42Node *test, GHashTable *names, gpointer user_data);
 static void add_contours (M42Plot *p, const double *z, guint n, double x0, double x1,
                           double y0, double y1, double lowest, double highest,
@@ -3335,6 +3336,256 @@ walk_downhill (M42Session *s, const M42Node *f, const char *var, double start,
   return x;
 }
 
+/* Where a minimum sits, written as a fraction when it is a simple one
+ * and as a decimal otherwise.  A place found by walking downhill is a
+ * decimal in truth, and dressing 1.30083956599288 up as 67710/52051
+ * says something that is not so. */
+static M42Node *
+place_node (double x)
+{
+  M42Node *nice = coefficient_node (x);
+
+  if (nice != NULL && nice->kind == M42_NODE_BINARY && nice->op == M42_TOK_SLASH &&
+      m42_node_child (nice, 1)->kind == M42_NODE_NUMBER &&
+      fabs (m42_node_child (nice, 1)->number) > 1000)
+    {
+      m42_node_free (nice);
+      return m42_node_number (x);
+    }
+  return nice;
+}
+
+/* The lowest or highest a function goes over the whole line, found
+ * where its derivative is nothing.  Minimize[x^2 - 4 x + 7, x] is
+ * {3, {x -> 2}}, and exactly so: the places come from Solve, not from
+ * walking downhill, so a quadratic answers in whole numbers.  NULL
+ * when there is no derivative to take or nothing solves it, and the
+ * numeric search is left to answer instead. */
+static M42Value *
+extremum_by_calculus (M42Session *s, const M42Node *f, const char *var,
+                      gboolean maximise)
+{
+  g_autoptr (M42Node) slope = m42_node_differentiate (f, var);
+  g_autoptr (M42Node) equation = NULL;
+  g_autoptr (M42Node) call = NULL;
+  g_autoptr (M42Value) found = NULL;
+  double best = maximise ? -INFINITY : INFINITY, best_where = 0;
+  gboolean any = FALSE;
+
+  if (slope == NULL)
+    return NULL;
+  equation = m42_node_binary (M42_TOK_EQ, m42_node_copy (slope), m42_node_number (0));
+  call = m42_node_new (M42_NODE_CALL);
+  call->name = g_strdup ("Solve");
+  g_ptr_array_add (call->children, g_steal_pointer (&equation));
+  g_ptr_array_add (call->children, m42_node_ident (var));
+
+  found = solve (s, call);
+  if (is_error (found) || found->kind != M42_VALUE_LIST)
+    return NULL;
+  for (guint i = 0; i < m42_value_list_length (found); i++)
+    {
+      const M42Value *one = m42_value_list_nth (found, i);
+      double where, value;
+
+      if (one->kind == M42_VALUE_LIST && m42_value_list_length (one) == 1)
+        one = m42_value_list_nth (one, 0);
+      if (one->kind != M42_VALUE_EXPR || one->u.expr->kind != M42_NODE_RULE)
+        continue;
+      if (!constant_fold (m42_node_child (one->u.expr, 1), &where))
+        continue;
+      value = number_at (s, f, var, where);
+      if (!isfinite (value))
+        continue;
+      /* Every crest of a wave is as high as the next, so the one
+       * nearest nothing is the one to name: Maximize[Sin[x], x] is
+       * 1 at Pi/2, not at whichever root Solve listed first. */
+      {
+        double margin = 1e-9 * MAX (1.0, fabs (value));
+
+        if (!any || (maximise ? value > best + margin : value < best - margin) ||
+            (fabs (value - best) <= margin && fabs (where) < fabs (best_where)))
+          {
+            any = TRUE;
+            best = value;
+            best_where = where;
+          }
+      }
+    }
+  if (!any)
+    return NULL;
+
+  /* A stationary point that is neither the top nor the bottom -- a
+   * cubic's turn, or a function that runs away -- is not an answer.
+   * Two steps out either side say which it is. */
+  {
+    double step = 1e-3 * MAX (1.0, fabs (best_where));
+    double left = number_at (s, f, var, best_where - step);
+    double right = number_at (s, f, var, best_where + step);
+
+    if (isfinite (left) && isfinite (right) &&
+        (maximise ? (left > best || right > best) : (left < best || right < best)))
+      return NULL;
+  }
+  /* And it has to be the best anywhere, not only hereabouts. */
+  {
+    static const double FAR[] = { -1e6, -1e3, -37.5, 37.5, 1e3, 1e6 };
+
+    for (guint i = 0; i < G_N_ELEMENTS (FAR); i++)
+      {
+        double there = number_at (s, f, var, best_where + FAR[i]);
+
+        if (isfinite (there) && (maximise ? there > best + 1e-9 : there < best - 1e-9))
+          return NULL;
+      }
+  }
+
+  if (fabs (best - round (best)) < 1e-9)
+    best = round (best);
+  if (fabs (best_where - round (best_where)) < 1e-9)
+    best_where = round (best_where);
+  {
+    M42Value *out = m42_value_list_new ();
+    M42Value *pair = m42_value_list_new ();
+    M42Node *rule = m42_node_new (M42_NODE_RULE);
+    M42Node *place = place_node (best_where);
+    M42Value *value = NULL;
+
+    /* The place came out exactly, so the value can too: put it back
+     * into the function and let the evaluator work it out, which is
+     * how Minimize[x^2 - x, x] answers -1/4 rather than -0.25. */
+    {
+      g_autoptr (M42Node) put = m42_node_substitute (f, var, place);
+
+      if (put != NULL)
+        {
+          M42Value *worked = eval (s, put);
+          double check;
+
+          if (!is_error (worked) && value_number (worked, &check) &&
+              fabs (check - best) < 1e-7 * MAX (1.0, fabs (best)))
+            value = worked;
+          else
+            m42_value_unref (worked);
+        }
+    }
+    g_ptr_array_add (rule->children, m42_node_ident (var));
+    g_ptr_array_add (rule->children, place);
+    m42_value_list_append (pair, m42_value_expr (rule));
+    m42_value_list_append (out, value != NULL ? value : m42_value_number (best));
+    m42_value_list_append (out, pair);
+    return out;
+  }
+}
+
+/* Minimize[f, x] and its three companions: the second argument is the
+ * letter alone, and the answer is the best the function does anywhere
+ * rather than the nearest dip to a starting point. */
+static M42Value *
+best_anywhere (M42Session *s, const M42Node *call, const char *name)
+{
+  static const double STARTS[] = { -100, -10, -3, -0.5, 0, 0.5, 3, 10, 100 };
+  gboolean maximise = strstr (name, "Max") != NULL;
+  gboolean numeric = name[0] == 'N';
+  const M42Node *f, *spec;
+  const char *var;
+  double best = 0, best_where = 0;
+  gboolean any = FALSE;
+
+  if (call->children->len != 2)
+    return m42_value_error ("%s expects a function and a letter", name);
+  f = m42_node_child (call, 0);
+  spec = m42_node_child (call, 1);
+  /* {x} and {x, a, b} are written for it too. */
+  if (spec->kind == M42_NODE_LIST && spec->children->len >= 1)
+    spec = m42_node_child (spec, 0);
+  if (spec->kind != M42_NODE_IDENT)
+    return m42_value_error ("%s expects a letter to vary", name);
+  var = spec->name;
+
+  if (!numeric)
+    {
+      M42Value *exact = extremum_by_calculus (s, f, var, maximise);
+
+      if (exact != NULL)
+        return exact;
+    }
+
+  /* Downhill from a spread of starting points, keeping the best.  Two
+   * places that are equally good -- every crest of a wave is -- are
+   * settled by the one nearer nothing, so Maximize[Sin[x], x] answers
+   * at 1.5708 rather than wherever the walk happened to stop. */
+  for (guint i = 0; i < G_N_ELEMENTS (STARTS); i++)
+    {
+      double where = walk_downhill (s, f, var, STARTS[i], maximise);
+      double value = number_at (s, f, var, where);
+      double margin = 1e-9 * MAX (1.0, fabs (value));
+
+      if (!isfinite (value))
+        continue;
+      if (!any || (maximise ? value > best + margin : value < best - margin) ||
+          (fabs (value - best) <= margin && fabs (where) < fabs (best_where)))
+        {
+          any = TRUE;
+          best = value;
+          best_where = where;
+        }
+    }
+  if (!any)
+    return m42_value_error ("%s: nothing was found", name);
+
+  /* A function that never turns round has no best value, and saying a
+   * number would be a lie: x^3 goes down for ever, and the walk simply
+   * stops wherever it ran out of patience. */
+  {
+    static const double OUT[] = { -1e8, 1e8, -1e12, 1e12 };
+
+    for (guint i = 0; i < G_N_ELEMENTS (OUT); i++)
+      {
+        double there = number_at (s, f, var, OUT[i]);
+
+        if (isfinite (there) && (maximise ? there > best : there < best))
+          {
+            M42Value *out = m42_value_list_new ();
+            M42Value *pair = m42_value_list_new ();
+            M42Node *rule = m42_node_new (M42_NODE_RULE);
+            M42Node *edge = m42_node_ident ("Infinity");
+
+            if (OUT[i] < 0)
+              edge = m42_node_unary (M42_TOK_MINUS, edge);
+            g_ptr_array_add (rule->children, m42_node_ident (var));
+            g_ptr_array_add (rule->children, edge);
+            m42_value_list_append (pair, m42_value_expr (rule));
+            {
+              M42Node *value = m42_node_ident ("Infinity");
+
+              if (!maximise)
+                value = m42_node_unary (M42_TOK_MINUS, value);
+              m42_value_list_append (out, m42_value_expr (value));
+            }
+            m42_value_list_append (out, pair);
+            return out;
+          }
+      }
+  }
+  if (fabs (best_where - round (best_where)) < 1e-7)
+    best_where = round (best_where);
+  if (fabs (best - round (best)) < 1e-7)
+    best = round (best);
+  {
+    M42Value *out = m42_value_list_new ();
+    M42Value *pair = m42_value_list_new ();
+    M42Node *rule = m42_node_new (M42_NODE_RULE);
+
+    g_ptr_array_add (rule->children, m42_node_ident (var));
+    g_ptr_array_add (rule->children, place_node (best_where));
+    m42_value_list_append (pair, m42_value_expr (rule));
+    m42_value_list_append (out, m42_value_number (best));
+    m42_value_list_append (out, pair);
+    return out;
+  }
+}
+
 static M42Value *
 find_extremum (M42Session *s, const M42Node *call, const char *name)
 {
@@ -3406,8 +3657,9 @@ find_extremum (M42Session *s, const M42Node *call, const char *name)
   if (fabs (value - round (value)) < 1e-7)
     value = round (value);
 
-  /* MATLAB gives the place; Mathematica gives {value, {x -> place}}. */
-  if (bounded)
+  /* MATLAB gives the place; Mathematica gives {value, {x -> place}}.
+   * So does ArgMin, whose whole point is the place. */
+  if (bounded || strstr (name, "Arg") != NULL || strstr (name, "arg") != NULL)
     return m42_value_number (where);
 
   pair = m42_value_list_new ();
@@ -3415,7 +3667,7 @@ find_extremum (M42Session *s, const M42Node *call, const char *name)
     M42Node *rule = m42_node_new (M42_NODE_RULE);
 
     g_ptr_array_add (rule->children, m42_node_ident (var));
-    g_ptr_array_add (rule->children, coefficient_node (where));
+    g_ptr_array_add (rule->children, place_node (where));
     m42_value_list_append (pair, m42_value_expr (m42_node_simplify (rule)));
     m42_node_free (rule);
   }
@@ -3940,6 +4192,60 @@ trig_expand (M42Session *s, const M42Node *tree)
   g_autoptr (M42Node) wide = m42_node_expand (opened);
 
   return simplify_hard (s, wide);
+}
+
+/* Waves written as exponentials of an imaginary angle, which is what
+ * Euler's formula says they are, and the hyperbolic ones written as
+ * exponentials of a real one. */
+static M42Node *
+trig_to_exp (M42Session *s, const M42Node *tree)
+{
+  static const char *const TO_EXP[] = {
+    "Tan[u_] -> (Exp[I u] - Exp[-I u])/(I (Exp[I u] + Exp[-I u]))",
+    "Tanh[u_] -> (Exp[u] - Exp[-u])/(Exp[u] + Exp[-u])",
+    "Sin[u_] -> (Exp[I u] - Exp[-I u])/(2 I)",
+    "Cos[u_] -> (Exp[I u] + Exp[-I u])/2",
+    "Sinh[u_] -> (Exp[u] - Exp[-u])/2",
+    "Cosh[u_] -> (Exp[u] + Exp[-u])/2",
+  };
+
+  return rewrite_by_rules (s, tree, TO_EXP, G_N_ELEMENTS (TO_EXP), 2);
+}
+
+/* And back the other way: Exp[x] is Cosh[x] + Sinh[x], and an
+ * imaginary angle gives the waves again. */
+static M42Node *
+exp_to_trig (M42Session *s, const M42Node *tree)
+{
+  static const char *const TO_TRIG[] = {
+    "Exp[I u_] -> Cos[u] + I Sin[u]",
+    "Exp[u_] -> Cosh[u] + Sinh[u]",
+  };
+  g_autoptr (M42Node) opened = rewrite_by_rules (s, tree, TO_TRIG,
+                                                 G_N_ELEMENTS (TO_TRIG), 1);
+
+  return simplify_hard (s, opened);
+}
+
+/* Log[a b] taken apart into Log[a] + Log[b], and the powers with it.
+ * It is true when the letters stand for positive numbers, which is
+ * what PowerExpand assumes and says so in every manual. */
+static M42Node *
+power_expand (M42Session *s, const M42Node *tree)
+{
+  static const char *const APART[] = {
+    "Log[u_ v_] -> Log[u] + Log[v]",
+    "Log[u_/v_] -> Log[u] - Log[v]",
+    "Log[u_^n_] -> n Log[u]",
+    "Sqrt[u_ v_] -> Sqrt[u] Sqrt[v]",
+    "(u_ v_)^n_ -> u^n v^n",
+    "Sqrt[u_^2] -> u",
+    "(u_^a_)^b_ -> u^(a b)",
+  };
+  g_autoptr (M42Node) opened = rewrite_by_rules (s, tree, APART,
+                                                 G_N_ELEMENTS (APART), 3);
+
+  return simplify_hard (s, opened);
 }
 
 /* One solution of a y'' + b y' + c y == R(x), with the two solutions of
@@ -12094,6 +12400,20 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       return m42_value_expr (span);
     }
 
+  if ((name_is (name, "TrigToExp", NULL) || name_is (name, "ExpToTrig", NULL) ||
+       name_is (name, "PowerExpand", NULL)) && args->len == 1)
+    {
+      g_autoptr (M42Node) written = value_to_node (ARG (0));
+
+      if (written == NULL)
+        return m42_value_ref (ARG (0));
+      if (name_is (name, "TrigToExp", NULL))
+        return expr_result (trig_to_exp (s, written));
+      if (name_is (name, "ExpToTrig", NULL))
+        return expr_result (exp_to_trig (s, written));
+      return expr_result (power_expand (s, written));
+    }
+
   if (name_is (name, "TrigReduce", NULL) && args->len == 1)
     {
       g_autoptr (M42Node) written = value_to_node (ARG (0));
@@ -12903,9 +13223,63 @@ eval_call (M42Session *s, const M42Node *n)
       name_is (name, "DensityPlot", NULL))
     return plot3d (s, n, name_is (name, "DensityPlot", NULL));
   if (name_is (name, "PolarPlot", "polarplot")) return parametric_plot (s, n, TRUE);
+  if (name_is (name, "Minimize", NULL) || name_is (name, "Maximize", NULL) ||
+      name_is (name, "NMinimize", NULL) || name_is (name, "NMaximize", NULL))
+    return best_anywhere (s, n, name);
   if (name_is (name, "FindMinimum", "fminsearch") || name_is (name, "FindMaximum", NULL) ||
-      name_is (name, "fminbnd", NULL) || name_is (name, "ArgMin", "argmin"))
-    return find_extremum (s, n, name);
+      name_is (name, "fminbnd", NULL) || name_is (name, "ArgMin", "argmin") ||
+      name_is (name, "ArgMax", "argmax"))
+    {
+      /* ArgMin[{3, 1, 2}] is 2: the place in the list where the
+       * smallest one sits, counting from one. */
+      if (n->children->len == 1 &&
+          (name_is (name, "ArgMin", "argmin") || name_is (name, "ArgMax", "argmax")))
+        {
+          g_autoptr (M42Value) v = eval (s, m42_node_child (n, 0));
+          gboolean biggest = name_is (name, "ArgMax", "argmax");
+          double best = 0;
+          guint at = 0;
+
+          if (is_error (v))
+            return g_steal_pointer (&v);
+          if (!m42_value_is_vector (v) || m42_value_list_length (v) == 0)
+            return m42_value_error ("%s wants a list of numbers, or a function and a "
+                                    "letter", name);
+          for (guint i = 0; i < m42_value_list_length (v); i++)
+            {
+              double x = as_double (m42_value_list_nth (v, i));
+
+              if (i == 0 || (biggest ? x > best : x < best))
+                {
+                  best = x;
+                  at = i;
+                }
+            }
+          return m42_value_number (at + 1);
+        }
+      /* ArgMin[f, x] with a bare letter looks everywhere, as Minimize
+       * does, and answers with the place alone. */
+      if (n->children->len == 2 && m42_node_child (n, 1)->kind == M42_NODE_IDENT &&
+          (name_is (name, "ArgMin", "argmin") || name_is (name, "ArgMax", "argmax")))
+        {
+          g_autoptr (M42Value) both =
+            best_anywhere (s, n, name_is (name, "ArgMin", "argmin") ? "Minimize" : "Maximize");
+          const M42Value *pair;
+
+          if (is_error (both))
+            return g_steal_pointer (&both);
+          pair = m42_value_list_nth (both, 1);
+          if (pair->kind == M42_VALUE_LIST && m42_value_list_length (pair) == 1)
+            {
+              const M42Value *rule = m42_value_list_nth (pair, 0);
+
+              if (rule->kind == M42_VALUE_EXPR && rule->u.expr->kind == M42_NODE_RULE)
+                return expr_result (m42_node_copy (m42_node_child (rule->u.expr, 1)));
+            }
+          return m42_value_ref ((M42Value *) both);
+        }
+      return find_extremum (s, n, name);
+    }
   if (name_is (name, "Piecewise", NULL) && n->children->len >= 1 &&
       m42_node_child (n, 0)->kind == M42_NODE_LIST)
     {
