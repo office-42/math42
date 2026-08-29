@@ -420,6 +420,7 @@ spelling. Where two names are given, either will do.
 | `Integrate[f, {x, a, b}]` | between bounds: exact if it can be, Simpson's rule if not |
 | `NIntegrate[f, {x, a, b}]` | always numeric |
 | `Limit[f, x -> a]` | including `x -> Infinity`; found numerically, and written as the constant when it is one — `Limit[(1 + 1/n)^n, n -> Infinity]` is `E` |
+| `Residue[f, {x, a}]` | what is left of the function at a pole, up to order four: `Residue[1/(x^2 - 1), {x, 1}]` is `1/2` |
 | `Series[f, {x, a, n}]` | the Taylor polynomial |
 | `NDSolve[f, {x, a, b}, y0]`, `ode45` | solves y′ = f(x, y) by Runge–Kutta |
 | `DSolve[eqn, y, x]` | the linear equations, exactly: a first order one by its integrating factor, a second order one with constant coefficients by variation of parameters |
@@ -889,6 +890,7 @@ A polynomial is a list of coefficients, highest power first.
 | `polyval(p, x)` | the polynomial at x |
 | `polyfit(x, y, n)` | least squares through the points |
 | `Fit[data, {1, x, x^2}, x]` | the combination of those functions closest to the points, by least squares |
+| `FindFit[data, model, {a, b}, x]` | the parameters of any model at all that fit the points best, by Nelder and Mead's simplex: `FindFit[data, a Exp[b x], {a, b}, x]` |
 | `Interpolation[data]` | a function of one argument, drawing a straight line between the points |
 | `roots(p)` | every root, complex ones included |
 | `conv(a, b)` | two polynomials multiplied |

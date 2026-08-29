@@ -483,6 +483,7 @@ static M42Value *interpolation_function (M42Session *s, const M42Value *data);
 static M42Value *import_file (const char *path, const char *what);
 static M42Node *cancel_common_factor (const M42Node *tree);
 static M42Value *solve (M42Session *s, const M42Node *call);
+static M42Node *simplify_hard (M42Session *s, const M42Node *written);
 static gboolean pattern_test (const M42Node *test, GHashTable *names, gpointer user_data);
 static void add_contours (M42Plot *p, const double *z, guint n, double x0, double x1,
                           double y0, double y1, double lowest, double highest,
@@ -3504,6 +3505,349 @@ extremum_by_calculus (M42Session *s, const M42Node *f, const char *var,
     m42_value_list_append (out, pair);
     return out;
   }
+}
+
+/* How badly one set of values for the parameters fits the points. */
+static double
+fit_badness (M42Session *s, const M42Node *model, const char *var, GStrv names,
+             const double *values, const GArray *xs, const GArray *ys)
+{
+  g_autoptr (M42Node) put = m42_node_copy (model);
+  double total = 0;
+
+  for (guint i = 0; names[i] != NULL; i++)
+    {
+      g_autoptr (M42Node) number = coefficient_node (values[i]);
+      M42Node *next = m42_node_substitute (put, names[i], number);
+
+      if (next == NULL)
+        return INFINITY;
+      m42_node_free (put);
+      put = next;
+    }
+  for (guint i = 0; i < xs->len; i++)
+    {
+      double got = number_at (s, put, var, g_array_index (xs, double, i));
+      double want = g_array_index (ys, double, i);
+      double off;
+
+      if (!isfinite (got))
+        return INFINITY;
+      off = got - want;
+      total += off * off;
+    }
+  return total;
+}
+
+/* FindFit[data, model, {a, b}, x]: the values of a and b that leave
+ * the least squared error, found by Nelder and Mead's simplex, which
+ * needs no derivatives and so does not care what shape the model is.
+ * The answer is a list of rules, as Mathematica gives it. */
+static M42Value *
+find_fit (M42Session *s, const M42Node *call)
+{
+  g_autoptr (M42Value) data = NULL;
+  g_autoptr (GArray) xs = g_array_new (FALSE, FALSE, sizeof (double));
+  g_autoptr (GArray) ys = g_array_new (FALSE, FALSE, sizeof (double));
+  g_auto (GStrv) names = NULL;
+  g_autofree double *start = NULL;
+  const M42Node *model, *params;
+  const char *var;
+  guint n;
+
+  if (call->children->len != 4)
+    return m42_value_error ("FindFit expects data, a model, its parameters and a letter");
+  data = eval (s, m42_node_child (call, 0));
+  if (is_error (data))
+    return g_steal_pointer (&data);
+  model = m42_node_child (call, 1);
+  params = m42_node_child (call, 2);
+  if (m42_node_child (call, 3)->kind != M42_NODE_IDENT)
+    return m42_value_error ("FindFit expects a letter as its fourth argument");
+  var = m42_node_child (call, 3)->name;
+
+  /* The points, either as pairs or as heights over 1, 2, 3... */
+  if (data->kind != M42_VALUE_LIST || m42_value_list_length (data) == 0)
+    return m42_value_error ("FindFit wants a list of points");
+  for (guint i = 0; i < m42_value_list_length (data); i++)
+    {
+      const M42Value *one = m42_value_list_nth (data, i);
+      double x, y;
+
+      if (one->kind == M42_VALUE_LIST && m42_value_list_length (one) == 2)
+        {
+          x = as_double (m42_value_list_nth (one, 0));
+          y = as_double (m42_value_list_nth (one, 1));
+        }
+      else if (is_numeric (one))
+        {
+          x = i + 1;
+          y = as_double (one);
+        }
+      else
+        return m42_value_error ("FindFit wants numbers, as pairs or on their own");
+      g_array_append_val (xs, x);
+      g_array_append_val (ys, y);
+    }
+
+  /* The parameters, with a starting value each. */
+  {
+    g_autoptr (GPtrArray) found = g_ptr_array_new_with_free_func (g_free);
+    g_autoptr (GArray) firsts = g_array_new (FALSE, FALSE, sizeof (double));
+
+    if (params->kind != M42_NODE_LIST || params->children->len == 0)
+      return m42_value_error ("FindFit wants a list of parameters");
+    for (guint i = 0; i < params->children->len; i++)
+      {
+        const M42Node *one = m42_node_child (params, i);
+        double first = 1;
+
+        if (one->kind == M42_NODE_LIST && one->children->len == 2 &&
+            m42_node_child (one, 0)->kind == M42_NODE_IDENT)
+          {
+            if (!constant_fold (m42_node_child (one, 1), &first))
+              first = 1;
+            one = m42_node_child (one, 0);
+          }
+        if (one->kind != M42_NODE_IDENT)
+          return m42_value_error ("FindFit wants letters for parameters");
+        g_ptr_array_add (found, g_strdup (one->name));
+        g_array_append_val (firsts, first);
+      }
+    n = found->len;
+    names = g_new0 (char *, n + 1);
+    start = g_new0 (double, n);
+    for (guint i = 0; i < n; i++)
+      {
+        names[i] = g_strdup (g_ptr_array_index (found, i));
+        start[i] = g_array_index (firsts, double, i);
+      }
+  }
+
+  /* Nelder and Mead: n + 1 corners that crawl downhill, the worst one
+   * reflected through the middle of the others each round. */
+  {
+    guint corners = n + 1;
+    g_autofree double *point = g_new0 (double, corners * n);
+    g_autofree double *score = g_new0 (double, corners);
+    g_autofree double *middle = g_new0 (double, n);
+    g_autofree double *tried = g_new0 (double, n);
+
+    for (guint c = 0; c < corners; c++)
+      {
+        for (guint i = 0; i < n; i++)
+          point[c * n + i] = start[i] + (c == i + 1 ? (start[i] != 0 ? start[i] * 0.5 : 0.5)
+                                                    : 0);
+        score[c] = fit_badness (s, model, var, names, point + c * n, xs, ys);
+      }
+
+    for (int round = 0; round < 400 * (int) n; round++)
+      {
+        guint worst = 0, best = 0, second = 0;
+
+        for (guint c = 1; c < corners; c++)
+          {
+            if (score[c] > score[worst])
+              worst = c;
+            if (score[c] < score[best])
+              best = c;
+          }
+        for (guint c = 0; c < corners; c++)
+          if (c != worst && (second == worst || score[c] > score[second]))
+            second = c;
+        if (isfinite (score[best]) && isfinite (score[worst]) &&
+            score[worst] - score[best] < 1e-14 * MAX (1.0, fabs (score[best])))
+          break;
+
+        for (guint i = 0; i < n; i++)
+          {
+            double sum = 0;
+
+            for (guint c = 0; c < corners; c++)
+              if (c != worst)
+                sum += point[c * n + i];
+            middle[i] = sum / n;
+          }
+        /* Reflected, and then stretched or pulled in by what it finds. */
+        {
+          double got;
+          double stretch = 1;
+
+          for (guint i = 0; i < n; i++)
+            tried[i] = middle[i] + (middle[i] - point[worst * n + i]);
+          got = fit_badness (s, model, var, names, tried, xs, ys);
+          if (got < score[best])
+            stretch = 2;
+          else if (got >= score[second])
+            stretch = 0.5;
+          if (stretch != 1)
+            {
+              g_autofree double *again = g_new0 (double, n);
+              double other;
+
+              for (guint i = 0; i < n; i++)
+                again[i] = middle[i] + stretch * (middle[i] - point[worst * n + i]);
+              other = fit_badness (s, model, var, names, again, xs, ys);
+              if (other < got)
+                {
+                  got = other;
+                  for (guint i = 0; i < n; i++)
+                    tried[i] = again[i];
+                }
+            }
+          if (got < score[worst])
+            {
+              score[worst] = got;
+              for (guint i = 0; i < n; i++)
+                point[worst * n + i] = tried[i];
+            }
+          else
+            {
+              /* Nothing better anywhere out there: draw the whole
+               * simplex in towards its best corner. */
+              for (guint c = 0; c < corners; c++)
+                if (c != best)
+                  {
+                    for (guint i = 0; i < n; i++)
+                      point[c * n + i] = (point[c * n + i] + point[best * n + i]) / 2;
+                    score[c] = fit_badness (s, model, var, names, point + c * n, xs, ys);
+                  }
+            }
+        }
+      }
+
+    {
+      guint best = 0;
+      M42Value *out = m42_value_list_new ();
+
+      for (guint c = 1; c < corners; c++)
+        if (score[c] < score[best])
+          best = c;
+      if (!isfinite (score[best]))
+        {
+          m42_value_unref (out);
+          return m42_value_error ("FindFit: no fit was found");
+        }
+      for (guint i = 0; i < n; i++)
+        {
+          double x = point[best * n + i];
+          M42Node *rule = m42_node_new (M42_NODE_RULE);
+
+          if (fabs (x - round (x)) < 1e-7)
+            x = round (x);
+          g_ptr_array_add (rule->children, m42_node_ident (names[i]));
+          g_ptr_array_add (rule->children, m42_node_number (x));
+          m42_value_list_append (out, m42_value_expr (rule));
+        }
+      return out;
+    }
+  }
+}
+
+/* What is left of a function at a pole: the number the integral round
+ * it gives, over 2 Pi I.  For a pole of order k at a,
+ *
+ *   Res = 1/(k-1)! lim (d/dx)^(k-1) [ (x - a)^k f(x) ]
+ *
+ * and the order is not known beforehand, so the orders are tried in
+ * turn and the first one that leaves something finite behind is the
+ * one.  Anything that is not a pole -- a function that is perfectly
+ * well behaved there -- gives nothing, which is the right answer. */
+static M42Value *
+residue (M42Session *s, const M42Node *call)
+{
+  const M42Node *f, *spec;
+  const char *var;
+  g_autoptr (M42Node) at = NULL;
+  double place;
+
+  if (call->children->len != 2)
+    return m42_value_error ("Residue expects a function and {x, a}");
+  f = m42_node_child (call, 0);
+  spec = m42_node_child (call, 1);
+  if (spec->kind != M42_NODE_LIST || spec->children->len != 2 ||
+      m42_node_child (spec, 0)->kind != M42_NODE_IDENT)
+    return m42_value_error ("Residue expects {x, a} as its second argument");
+  var = m42_node_child (spec, 0)->name;
+  at = m42_node_simplify (m42_node_child (spec, 1));
+  if (at == NULL || !constant_fold (at, &place))
+    return m42_value_error ("Residue: the place has to be a number");
+
+  for (int order = 1; order <= 4; order++)
+    {
+      g_autoptr (M42Node) gap =
+        m42_node_binary (M42_TOK_MINUS, m42_node_ident (var), m42_node_copy (at));
+      g_autoptr (M42Node) raised =
+        m42_node_binary (M42_TOK_CARET, g_steal_pointer (&gap), m42_node_number (order));
+      g_autoptr (M42Node) times =
+        m42_node_binary (M42_TOK_STAR, g_steal_pointer (&raised), m42_node_copy (f));
+      g_autoptr (M42Node) tidy = simplify_hard (s, times);
+      double factorial = 1;
+      gboolean gave_up = FALSE;
+
+      for (int k = 1; k < order; k++)
+        {
+          M42Node *step = m42_node_differentiate (tidy, var);
+
+          factorial *= k;
+          if (step == NULL)
+            {
+              gave_up = TRUE;
+              break;
+            }
+          g_clear_pointer (&tidy, m42_node_free);
+          tidy = simplify_hard (s, step);
+          m42_node_free (step);
+          if (tidy == NULL)
+            {
+              gave_up = TRUE;
+              break;
+            }
+        }
+      if (gave_up || tidy == NULL)
+        continue;
+
+      /* The limit as x goes to a: the value there when it has one, and
+       * the two sides when it has not. */
+      {
+        double here = number_at (s, tidy, var, place);
+        double left = number_at (s, tidy, var, place - 1e-6);
+        double right = number_at (s, tidy, var, place + 1e-6);
+
+        if (!isfinite (left) || !isfinite (right) ||
+            fabs (left - right) > 1e-4 * MAX (1.0, fabs (left)))
+          continue;
+        if (isfinite (here))
+          {
+            /* Exactly, if putting the place in works out. */
+            g_autoptr (M42Node) put = m42_node_substitute (tidy, var, at);
+
+            if (put != NULL)
+              {
+                M42Value *worked = eval (s, put);
+                double check;
+
+                if (!is_error (worked) && value_number (worked, &check) &&
+                    fabs (check - here / factorial) < 1e-6 * MAX (1.0, fabs (here)))
+                  {
+                    if (factorial == 1)
+                      return worked;
+                    m42_value_unref (worked);
+                  }
+                else
+                  m42_value_unref (worked);
+              }
+          }
+        {
+          double answer = (left + right) / 2 / factorial;
+
+          if (fabs (answer - round (answer)) < 1e-6)
+            answer = round (answer);
+          return m42_value_number (answer);
+        }
+      }
+    }
+  return m42_value_error ("Residue: no pole of order four or less was found there");
 }
 
 /* Minimize[f, x] and its three companions: the second argument is the
@@ -13547,6 +13891,10 @@ eval_call (M42Session *s, const M42Node *n)
       name_is (name, "DensityPlot", NULL))
     return plot3d (s, n, name_is (name, "DensityPlot", NULL));
   if (name_is (name, "PolarPlot", "polarplot")) return parametric_plot (s, n, TRUE);
+  if (name_is (name, "Residue", NULL))
+    return residue (s, n);
+  if (name_is (name, "FindFit", "lsqcurvefit"))
+    return find_fit (s, n);
   if (name_is (name, "Minimize", NULL) || name_is (name, "Maximize", NULL) ||
       name_is (name, "NMinimize", NULL) || name_is (name, "NMaximize", NULL))
     return best_anywhere (s, n, name);

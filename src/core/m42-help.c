@@ -32,6 +32,8 @@ static const M42Function FUNCTIONS[] = {
   { "Factor", "factor", "Factor[p]", "writes a polynomial as a product of its factors", "Algebra" },
   { "Simplify", "simplify", "Simplify[e]", "folds the constants and drops the identities", "Algebra" },
   { "Solve", "NSolve", "Solve[lhs == rhs, x]", "every root of a polynomial; a list of linear equations and a list of unknowns solves a system", "Algebra" },
+  { "FindFit", "lsqcurvefit", "FindFit[data, model, {a, b}, x]", "the parameters that fit the points best, by least squares", "Statistics" },
+  { "Residue", NULL, "Residue[f, {x, a}]", "what is left of a function at a pole, up to order four", "Calculus" },
   { "Roots", NULL, "Roots[lhs == rhs, x]", "the same roots written as x == a || x == b", "Algebra" },
   { "Variables", "symvar", "Variables[e]", "the letters in an expression", "Algebra" },
   { "PolynomialQ", NULL, "PolynomialQ[e, x]", "whether the expression is a polynomial in x", "Algebra" },
