@@ -152,12 +152,12 @@ join_broken_lines (const char *contents)
 static void
 matlab_line_in (GString *out, const char *line)
 {
-  gboolean in_string = FALSE;
+  char opened_with = 0;
   const char *at;
 
   for (at = line; *at != '\0'; at++)
     {
-      if (in_string)
+      if (opened_with != 0)
         {
           if (at[0] == '\\' && at[1] != '\0')
             {
@@ -165,10 +165,29 @@ matlab_line_in (GString *out, const char *line)
               g_string_append_c (out, *at);
               continue;
             }
-          if (at[0] == '"' || at[0] == '\'')
+          /* MATLAB writes an apostrophe inside its own kind of string
+           * by doubling it, so 'it''s' is one string. */
+          if (opened_with == '\'' && at[0] == '\'' && at[1] == '\'')
             {
-              in_string = FALSE;
+              g_string_append_c (out, '\'');
+              at++;
+              continue;
+            }
+          /* Only the quote that opened the string closes it: "it's"
+           * is one string with an apostrophe in it, and reading the
+           * apostrophe as the end of it turned the line into
+           * nonsense. */
+          if (at[0] == opened_with)
+            {
+              opened_with = 0;
               g_string_append_c (out, '"');
+              continue;
+            }
+          /* math42 writes its strings with double quotes, so one
+           * inside has to be spelt out. */
+          if (at[0] == '"')
+            {
+              g_string_append (out, "\\\"");
               continue;
             }
           g_string_append_c (out, *at);
@@ -177,13 +196,16 @@ matlab_line_in (GString *out, const char *line)
       if (at[0] == '"' || at[0] == '\'')
         {
           /* A quote after a name or a bracket is MATLAB's transpose,
-           * not the start of a string. */
+           * not the start of a string -- and so is a quote after
+           * another one, which is how a second derivative is written.
+           * Without that, y'' was read as y' and then a string that
+           * swallowed the rest of the file. */
           gboolean transpose = at[0] == '\'' && at != line &&
                                (g_ascii_isalnum (at[-1]) || at[-1] == ')' ||
-                                at[-1] == ']' || at[-1] == '}');
+                                at[-1] == ']' || at[-1] == '}' || at[-1] == '\'');
 
           if (!transpose)
-            in_string = TRUE;
+            opened_with = at[0];
           /* math42 writes a string one way only, so MATLAB's single
            * quotes become double ones.  A transpose is left as it is,
            * since math42 writes that with a quote as well. */

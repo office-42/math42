@@ -92,7 +92,10 @@ A MATLAB script needs a little translating, and gets it: `%` comments
 become `(* … *)` on the way in and `%` again on the way out, since `%`
 means the previous output here; a line ending in `...` is joined to the
 next; and `'single quotes'` become `"double"` ones, while `A'` stays
-the transpose it is. What math42 cannot do — a `function` file, a cell
+the transpose it is — and so does the second `'` of `y''`, which is how
+a second derivative is written. An apostrophe inside a string is kept:
+MATLAB's `'it''s'` is read as `"it's"`, and a `'` inside a
+double-quoted string is left alone. What math42 cannot do — a `function` file, a cell
 array — is left as it was written, and says so on the line it is on.
 
 A Mathematica notebook is itself a Wolfram expression, and math42 reads
