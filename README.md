@@ -50,6 +50,13 @@ walks anything else with Runge-Kutta.
 `Jacobian`, and an integral over more than one range done a variable at
 a time.
 
+**Files.** A notebook is a `.m42` file of its inputs; math42 also
+reads and writes MATLAB `.m` scripts, Wolfram `.wl`/`.wls` scripts and
+Mathematica `.nb` notebooks, and a round trip through any of them
+comes back unchanged. `Import` and `Export` — `load` and `save` under
+MATLAB's spelling — carry matrices in and out through MATLAB's own
+`.mat` files, compressed or not, as well as CSV.
+
 **Discrete mathematics.** `HarmonicNumber`, `PartitionsP`, `MoebiusMu`,
 `JacobiSymbol`, `ContinuedFraction`, `PolyGamma`,
 `PowerMod`, `ExtendedGCD`, `ChineseRemainder`,

@@ -8,6 +8,7 @@ m42_core_sources = files(
   'core/m42-bigint.c',
   'core/m42-pattern.c',
   'core/m42-format.c',
+  'core/m42-mat.c',
   'core/m42-value.c',
   'core/m42-lexer.c',
   'core/m42-parser.c',

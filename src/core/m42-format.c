@@ -336,6 +336,182 @@ string_literal (const char **at)
  * a simple cell, and wrapped in RowBox and its kind for one that
  * Mathematica has laid out.  Taking the strings in order and putting
  * them end to end gives the input back either way. */
+/* --- the boxes a notebook is written in ---------------------------------
+ *
+ * Mathematica writes what was typed as boxes: RowBox for a run of
+ * pieces, SuperscriptBox for a power, FractionBox for a fraction laid
+ * out over a line, SqrtBox for a root.  Somebody typing x^2 in the
+ * front end gets SuperscriptBox["x", "2"], and pasting the strings
+ * together would give x2 -- a different thing entirely, and one that
+ * would run without a word said.  So the boxes are read as what they
+ * are and written back as a line.
+ */
+
+/* Whether the text is one piece that needs no brackets around it under
+ * a power or over a line: a name, a number, or something already in
+ * brackets of its own. */
+static gboolean
+stands_alone (const char *text)
+{
+  gsize n = strlen (text);
+
+  if (n == 0)
+    return TRUE;
+  if (text[0] == '(' && text[n - 1] == ')')
+    return TRUE;
+  for (gsize i = 0; i < n; i++)
+    if (!g_ascii_isalnum (text[i]) && text[i] != '.' && text[i] != '_')
+      return FALSE;
+  return TRUE;
+}
+
+static void
+append_piece (GString *out, const char *text)
+{
+  if (stands_alone (text))
+    g_string_append (out, text);
+  else
+    g_string_append_printf (out, "(%s)", text);
+}
+
+static void box_to_text (const char **at, GString *out);
+
+/* The arguments of Name[...], each read into a string of its own.  The
+ * bracket has been passed already. */
+static GPtrArray *
+box_arguments (const char **at)
+{
+  GPtrArray *args = g_ptr_array_new_with_free_func (g_free);
+
+  for (;;)
+    {
+      GString *one = g_string_new (NULL);
+
+      box_to_text (at, one);
+      g_strstrip (one->str);
+      one->len = strlen (one->str);
+      g_ptr_array_add (args, g_string_free (one, FALSE));
+      while (g_ascii_isspace (**at))
+        (*at)++;
+      if (**at == ',')
+        {
+          (*at)++;
+          continue;
+        }
+      if (**at == ']' || **at == '}')
+        (*at)++;
+      break;
+    }
+  return args;
+}
+
+/* One box, or one piece of text, written back as source.  Stops at a
+ * comma or a closing bracket that is not its own. */
+static void
+box_to_text (const char **at, GString *out)
+{
+  while (g_ascii_isspace (**at))
+    (*at)++;
+
+  if (**at == '"')
+    {
+      g_autofree char *piece = string_literal (at);
+
+      g_string_append (out, piece);
+      return;
+    }
+
+  /* A list, as RowBox[{...}] holds: its pieces one after another. */
+  if (**at == '{')
+    {
+      g_autoptr (GPtrArray) args = NULL;
+
+      (*at)++;
+      args = box_arguments (at);
+      for (guint i = 0; i < args->len; i++)
+        g_string_append (out, g_ptr_array_index (args, i));
+      return;
+    }
+
+  if (g_ascii_isalpha (**at) || **at == '\\')
+    {
+      const char *start = *at;
+      g_autofree char *name = NULL;
+
+      while (g_ascii_isalnum (**at) || **at == '$')
+        (*at)++;
+      name = g_strndup (start, (gsize) (*at - start));
+      while (g_ascii_isspace (**at))
+        (*at)++;
+      if (**at != '[')
+        {
+          /* A name standing on its own, which is what it says. */
+          g_string_append (out, name);
+          return;
+        }
+      (*at)++;
+      {
+        g_autoptr (GPtrArray) args = box_arguments (at);
+        const char *a = args->len > 0 ? g_ptr_array_index (args, 0) : "";
+        const char *b = args->len > 1 ? g_ptr_array_index (args, 1) : "";
+
+        if (strcmp (name, "SuperscriptBox") == 0 && args->len >= 2)
+          {
+            append_piece (out, a);
+            g_string_append_c (out, '^');
+            append_piece (out, b);
+            return;
+          }
+        if (strcmp (name, "FractionBox") == 0 && args->len >= 2)
+          {
+            append_piece (out, a);
+            g_string_append_c (out, '/');
+            append_piece (out, b);
+            return;
+          }
+        if (strcmp (name, "SqrtBox") == 0 && args->len >= 1)
+          {
+            g_string_append_printf (out, "Sqrt[%s]", a);
+            return;
+          }
+        if (strcmp (name, "RadicalBox") == 0 && args->len >= 2)
+          {
+            g_string_append_printf (out, "(%s)^(1/%s)", a, b);
+            return;
+          }
+        if (strcmp (name, "SubscriptBox") == 0 && args->len >= 2)
+          {
+            /* x with a 1 under it is the name x1, which is a name
+             * math42 can hold; there is no Subscript here. */
+            g_string_append_printf (out, "%s%s", a, b);
+            return;
+          }
+        /* RowBox, BoxData, StyleBox, TagBox and the rest: what they
+         * hold, with anything after the first argument left alone --
+         * a style or an option says how it looks, not what it is. */
+        if (strcmp (name, "RowBox") == 0 || strcmp (name, "BoxData") == 0)
+          {
+            for (guint i = 0; i < args->len; i++)
+              g_string_append (out, g_ptr_array_index (args, i));
+            return;
+          }
+        g_string_append (out, a);
+        return;
+      }
+    }
+
+  /* Anything else -- an operator, a bracket the front end wrote as a
+   * character of its own -- is passed through until the next thing
+   * that matters. */
+  while (**at != '\0' && **at != ',' && **at != ']' && **at != '}' && **at != '"')
+    {
+      if (g_ascii_isalpha (**at) || **at == '{')
+        return;
+      g_string_append_c (out, **at);
+      (*at)++;
+    }
+}
+
 static char *
 notebook_read (const char *contents)
 {
@@ -348,7 +524,8 @@ notebook_read (const char *contents)
       const char *end = cell;
       int depth = 1;
       gboolean in_string = FALSE;
-      g_autoptr (GString) text = g_string_new (NULL);
+      g_autoptr (GPtrArray) args = NULL;
+      const char *reading;
 
       /* Where this cell ends. */
       for (; *end != '\0' && depth > 0; end++)
@@ -368,45 +545,78 @@ notebook_read (const char *contents)
           else if (end[0] == ']')
             depth--;
         }
-      at = end;
 
-      /* Only the cells that hold input. */
+      /* Mathematica puts an input and the output it gave inside one
+       * Cell[CellGroupData[{...}]].  That is not a cell to read but a
+       * box holding two, so the scan goes on inside it; otherwise the
+       * whole group counts as one input and the output is read as part
+       * of what was typed. */
       {
-        g_autofree char *whole = g_strndup (cell, (gsize) (end - cell));
+        const char *inside = cell;
 
-        if (strstr (whole, "\"Input\"") == NULL)
-          continue;
-        for (const char *p = whole; *p != '\0'; )
+        while (g_ascii_isspace (*inside))
+          inside++;
+        if (g_str_has_prefix (inside, "CellGroupData["))
           {
-            if (*p == '"')
-              {
-                g_autofree char *piece = string_literal (&p);
-
-                /* The name of the style is not part of the input. */
-                if (strcmp (piece, "Input") != 0 && strcmp (piece, "Output") != 0)
-                  g_string_append (text, piece);
-                continue;
-              }
-            p++;
+            at = cell;
+            continue;
           }
       }
-      g_strstrip (text->str);
-      text->len = strlen (text->str);
-      if (text->len > 0)
-        {
-          g_string_append (out, text->str);
-          g_string_append_c (out, '\n');
-        }
+      at = end;
+
+      /* Cell[content, "Style", options...]: only the ones that hold
+       * input, and only their content. */
+      reading = cell;
+      args = box_arguments (&reading);
+      if (args->len < 2 || strcmp (g_ptr_array_index (args, 1), "Input") != 0)
+        continue;
+      {
+        char *text = g_ptr_array_index (args, 0);
+
+        g_strstrip (text);
+        if (*text != '\0')
+          {
+            g_string_append (out, text);
+            g_string_append_c (out, '\n');
+          }
+      }
     }
   return g_string_free (out, FALSE);
 }
 
+/* One string as a Wolfram one, with the characters that cannot stand
+ * for themselves spelt out. */
+static void
+append_quoted (GString *out, const char *text)
+{
+  g_string_append_c (out, '"');
+  for (const char *p = text; *p != '\0'; p++)
+    {
+      if (*p == '\n')
+        {
+          g_string_append (out, "\\n");
+          continue;
+        }
+      if (*p == '"' || *p == '\\')
+        g_string_append_c (out, '\\');
+      g_string_append_c (out, *p);
+    }
+  g_string_append_c (out, '"');
+}
+
+/* A notebook is a Wolfram expression: a list of cells, each of them an
+ * input or the output that came of it.  The results are written down
+ * as well as the inputs, so that somebody opening the file in
+ * Mathematica sees what math42 answered; reading one back takes the
+ * Input cells and passes over the rest, which is what keeps a round
+ * trip unchanged. */
 static char *
-notebook_write (const char *inputs)
+notebook_write (const char *inputs, const char *const *outputs)
 {
   g_auto (GStrv) lines = g_strsplit (inputs, "\n", -1);
   GString *out = g_string_new (NULL);
   gboolean first = TRUE;
+  guint n = 0;
 
   g_string_append (out, "(* Content-type: application/vnd.wolfram.mathematica *)\n");
   g_string_append (out, "(* written by math42 *)\n\n");
@@ -414,20 +624,24 @@ notebook_write (const char *inputs)
   for (guint i = 0; lines[i] != NULL; i++)
     {
       const char *line = lines[i];
+      const char *result = outputs != NULL && outputs[i] != NULL ? outputs[i] : NULL;
 
       if (line[0] == '\0')
         continue;
+      n++;
       if (!first)
         g_string_append (out, ",\n");
       first = FALSE;
-      g_string_append (out, "Cell[BoxData[\"");
-      for (const char *p = line; *p != '\0'; p++)
+      g_string_append (out, "Cell[BoxData[");
+      append_quoted (out, line);
+      g_string_append_printf (out, "], \"Input\", CellLabel->\"In[%u]:=\"]", n);
+      if (result != NULL && *result != '\0')
         {
-          if (*p == '"' || *p == '\\')
-            g_string_append_c (out, '\\');
-          g_string_append_c (out, *p);
+          g_string_append (out, ",\n");
+          g_string_append (out, "Cell[BoxData[");
+          append_quoted (out, result);
+          g_string_append_printf (out, "], \"Output\", CellLabel->\"Out[%u]=\"]", n);
         }
-      g_string_append (out, "\"], \"Input\"]");
     }
   g_string_append (out, "\n}]\n");
   return g_string_free (out, FALSE);
@@ -440,6 +654,15 @@ m42_format_read (const char *contents, M42Format format)
 {
   if (contents == NULL)
     return g_strdup ("");
+  /* A Wolfram script begins with a line telling the shell what to run
+   * it with.  It is not something to evaluate, and math42 used to try:
+   * #!/usr/bin/env wolframscript came out as an input of its own. */
+  if (g_str_has_prefix (contents, "#!"))
+    {
+      const char *rest = strchr (contents, '\n');
+
+      contents = rest != NULL ? rest + 1 : "";
+    }
   switch (format)
     {
     case M42_FORMAT_MATLAB:   return matlab_read (contents);
@@ -449,7 +672,7 @@ m42_format_read (const char *contents, M42Format format)
 }
 
 char *
-m42_format_write (const char *inputs, M42Format format)
+m42_format_write (const char *inputs, const char *const *outputs, M42Format format)
 {
   if (inputs == NULL)
     return g_strdup ("");
@@ -457,7 +680,7 @@ m42_format_write (const char *inputs, M42Format format)
     {
     case M42_FORMAT_MATLAB:   return matlab_write (inputs);
     case M42_FORMAT_WOLFRAM:  return wolfram_write (inputs);
-    case M42_FORMAT_NOTEBOOK: return notebook_write (inputs);
+    case M42_FORMAT_NOTEBOOK: return notebook_write (inputs, outputs);
     default:                  return g_strdup (inputs);
     }
 }

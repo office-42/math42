@@ -119,7 +119,32 @@ double-quoted string is left alone. What math42 cannot do — a `function` file,
 array — is left as it was written, and says so on the line it is on.
 
 A Mathematica notebook is itself a Wolfram expression, and math42 reads
-the input cells out of one and writes one made of them. An expression
+the input cells out of one and writes one made of them — with the
+results beside them, as `Cell[…, "Output"]`, so that somebody opening
+the file in Mathematica sees what math42 answered. Reading one back
+takes the input cells and passes over the rest, so a round trip gives
+the notebook it started as. Input typed in Mathematica's own
+two-dimensional way is read as what it means: `SuperscriptBox["x", "2"]`
+is `x^2`, a `FractionBox` is a fraction, a `SqrtBox` a root, and an
+input and its output inside one `CellGroupData` are two cells, not one.
+
+**MATLAB's own `.mat` files.** `Import["run.mat"]` reads the variables
+of a MATLAB session and `Export["run.mat", m]` writes them, under
+MATLAB's own names — `load` and `save` are the same two functions
+under MATLAB's spelling:
+
+```
+In[m1]:= Export["run.mat", {"A" -> {{1, 2}, {3, 4}}, "v" -> {1, 2, 3}}]
+In[m2]:= load("run.mat")     Out[m2]= {"A" -> {{1, 2}, {3, 4}}, "v" -> {1, 2, 3}}
+```
+
+A file of one variable comes back as that variable; several come back
+as the rules `name -> value`. math42 reads the level 5 files every
+MATLAB since 1996 writes, compressed (version 7) or not, and writes
+uncompressed ones of the same kind, which MATLAB, Octave and SciPy all
+read. It does not read the HDF5 files `-v7.3` writes, and holds
+matrices of numbers and strings but not cells, structures or
+objects. An expression
 spread over several lines is put back together as the file is read.
 
 From a terminal, `math42-calc script.m` runs any of them, and

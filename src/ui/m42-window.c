@@ -220,9 +220,11 @@ static void
 save_to (M42Window *self, GFile *file)
 {
   g_autofree char *inputs = m42_notebook_get_inputs (M42_NOTEBOOK (self->notebook));
+  g_auto (GStrv) outputs = m42_notebook_get_outputs (M42_NOTEBOOK (self->notebook));
   g_autofree char *path = g_file_get_path (file);
   M42Format format = m42_format_for_path (path);
-  g_autofree char *text = m42_format_write (inputs, format);
+  g_autofree char *text = m42_format_write (inputs, (const char *const *) outputs,
+                                            format);
   g_autoptr (GError) error = NULL;
 
   if (!g_file_replace_contents (file, text, strlen (text), NULL, FALSE,
@@ -659,8 +661,10 @@ gboolean
 m42_window_save_as (M42Window *self, const char *path, GError **error)
 {
   g_autofree char *inputs = m42_notebook_get_inputs (M42_NOTEBOOK (self->notebook));
+  g_auto (GStrv) outputs = m42_notebook_get_outputs (M42_NOTEBOOK (self->notebook));
   M42Format format = m42_format_for_path (path);
-  g_autofree char *text = m42_format_write (inputs, format);
+  g_autofree char *text = m42_format_write (inputs, (const char *const *) outputs,
+                                            format);
 
   return g_file_set_contents (path, text, -1, error);
 }

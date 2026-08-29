@@ -30,6 +30,11 @@ char *m42_format_read (const char *contents, M42Format format);
 
 /* Those inputs written out again in that format.  inputs is one to a
  * line, as m42_notebook_get_inputs gives them. */
-char *m42_format_write (const char *inputs, M42Format format);
+/* The notebook as a file of that kind.  outputs, when it is given, is
+ * one line per input -- what the answer was -- and is written down by
+ * the formats that have a place for it; NULL asks for the inputs
+ * alone.  Reading such a file back gives the inputs again. */
+char *m42_format_write (const char *inputs, const char *const *outputs,
+                        M42Format format);
 
 G_END_DECLS

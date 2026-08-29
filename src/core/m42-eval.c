@@ -21,6 +21,7 @@
 #include "m42-symbolic.h"
 #include "m42-matrix.h"
 #include "m42-help.h"
+#include "m42-mat.h"
 #include "m42-pattern.h"
 
 #include <complex.h>
@@ -489,6 +490,8 @@ static void add_contours (M42Plot *p, const double *z, guint n, double x0, doubl
                           double y0, double y1, double lowest, double highest,
                           guint levels);
 static M42Value *export_file (const char *path, const M42Value *v, const char *what);
+static M42Value *export_mat (M42Session *s, const char *path, const M42Value *what,
+                             const char *called);
 static M42Value *closed_form_sum (M42Session *s, const M42Node *call, const char *upper_name);
 static gboolean value_matches (M42Session *s, const M42Value *v, const M42Value *pattern);
 static M42Node *symbolic_argument (M42Session *s, const M42Node *raw, const char *var);
@@ -12875,12 +12878,14 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
   /* --- reading and writing a file --------------------------------------- */
 
   if ((name_is (name, "Import", NULL) || name_is (name, "csvread", NULL) ||
-       name_is (name, "readmatrix", NULL) || name_is (name, "ReadString", NULL)) &&
+       name_is (name, "readmatrix", NULL) || name_is (name, "ReadString", NULL) ||
+       name_is (name, "load", NULL)) &&
       args->len >= 1 && ARG (0)->kind == M42_VALUE_STRING)
     return import_file (ARG (0)->u.string, name);
 
   if ((name_is (name, "Export", NULL) || name_is (name, "csvwrite", NULL) ||
-       name_is (name, "writematrix", NULL)) && args->len >= 2)
+       name_is (name, "writematrix", NULL) || name_is (name, "save", NULL)) &&
+      args->len >= 2)
     {
       /* Export["file", data] the Mathematica way round, and MATLAB's
        * csvwrite("file", data) the same; writematrix(data, "file")
@@ -12891,6 +12896,12 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
 
       if (where->kind != M42_VALUE_STRING)
         return m42_value_error ("%s wants a file name", name);
+      {
+        g_autofree char *lower = g_ascii_strdown (where->u.string, -1);
+
+        if (g_str_has_suffix (lower, ".mat"))
+          return export_mat (s, where->u.string, what, name);
+      }
       return export_file (where->u.string, what, name);
     }
 
@@ -14456,6 +14467,34 @@ import_file (const char *path, const char *what)
   g_autofree char *lower = g_ascii_strdown (path, -1);
   gboolean as_table;
 
+  /* MATLAB's own file of variables.  One variable comes back as
+   * itself; several come back as the rules name -> value, which is how
+   * math42 writes an association down. */
+  if (g_str_has_suffix (lower, ".mat"))
+    {
+      g_auto (GStrv) names = NULL;
+      g_autoptr (M42Value) found = m42_mat_read (path, &names, &error);
+      M42Value *out;
+
+      if (found == NULL)
+        return m42_value_error ("%s: %s", what, error->message);
+      if (m42_value_list_length (found) == 1)
+        return m42_value_ref (m42_value_list_nth (found, 0));
+      out = m42_value_list_new ();
+      for (guint i = 0; i < m42_value_list_length (found); i++)
+        {
+          M42Node *rule = m42_node_new (M42_NODE_RULE);
+          M42Node *left = m42_node_new (M42_NODE_STRING);
+
+          left->name = g_strdup (names != NULL && names[i] != NULL ? names[i] : "data");
+          g_ptr_array_add (rule->children, left);
+          g_ptr_array_add (rule->children,
+                           value_to_node (m42_value_list_nth (found, i)));
+          m42_value_list_append (out, m42_value_expr (rule));
+        }
+      return out;
+    }
+
   if (!g_file_get_contents (path, &contents, NULL, &error))
     return m42_value_error ("%s: %s", what, error->message);
 
@@ -14503,6 +14542,50 @@ import_file (const char *path, const char *what)
     }
     return out;
   }
+}
+
+/* A file of MATLAB's own: one value under a name, or the rules
+ * name -> value written out one after another. */
+static M42Value *
+export_mat (M42Session *s, const char *path, const M42Value *what,
+            const char *called)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (M42Value) values = m42_value_list_new ();
+  gboolean as_rules = FALSE;
+
+  if (what->kind == M42_VALUE_LIST && m42_value_list_length (what) > 0)
+    {
+      as_rules = TRUE;
+      for (guint i = 0; i < m42_value_list_length (what); i++)
+        {
+          const M42Value *one = m42_value_list_nth (what, i);
+
+          if (one->kind != M42_VALUE_EXPR || one->u.expr->kind != M42_NODE_RULE)
+            as_rules = FALSE;
+        }
+    }
+  if (as_rules)
+    for (guint i = 0; i < m42_value_list_length (what); i++)
+      {
+        const M42Node *rule = m42_value_list_nth (what, i)->u.expr;
+        const M42Node *left = m42_node_child (rule, 0);
+        M42Value *value = eval (s, m42_node_child (rule, 1));
+
+        g_ptr_array_add (names, g_strdup (left->name != NULL ? left->name : "data"));
+        m42_value_list_append (values, value);
+      }
+  else
+    {
+      g_ptr_array_add (names, g_strdup ("data"));
+      m42_value_list_append (values, m42_value_ref ((M42Value *) what));
+    }
+  g_ptr_array_add (names, NULL);
+
+  if (!m42_mat_write (path, (const char *const *) names->pdata, values, &error))
+    return m42_value_error ("%s: %s", called, error->message);
+  return m42_value_string (path);
 }
 
 /* A value written to disk: a table as rows of fields, anything else as

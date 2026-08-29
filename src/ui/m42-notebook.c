@@ -629,6 +629,31 @@ m42_notebook_input_at (M42Notebook *self, double x, double y)
   return NULL;
 }
 
+/* What each cell answered, one string for each input and in the same
+ * order, so that a format with a place for results can write them
+ * beside the lines that made them.  A cell that answered nothing at
+ * all -- a comment, or an assignment ending in a semicolon -- gets an
+ * empty string rather than a hole. */
+GStrv
+m42_notebook_get_outputs (M42Notebook *self)
+{
+  GPtrArray *out = g_ptr_array_new ();
+
+  for (guint i = 0; i < self->cells->len; i++)
+    {
+      Cell *c = g_ptr_array_index (self->cells, i);
+      char *text = NULL;
+
+      if (c->error != NULL)
+        text = g_strdup (c->error);
+      else if (c->value != NULL)
+        text = m42_value_to_string (c->value);
+      g_ptr_array_add (out, text != NULL ? text : g_strdup (""));
+    }
+  g_ptr_array_add (out, NULL);
+  return (GStrv) g_ptr_array_free (out, FALSE);
+}
+
 char *
 m42_notebook_get_inputs (M42Notebook *self)
 {

@@ -48,5 +48,6 @@ const char *m42_notebook_input_at (M42Notebook *self, double x, double y);
 
 /* The inputs so far, one per line, for saving. */
 char *m42_notebook_get_inputs (M42Notebook *self);
+GStrv m42_notebook_get_outputs (M42Notebook *self);
 
 G_END_DECLS
