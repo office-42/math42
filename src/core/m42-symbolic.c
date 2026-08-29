@@ -397,6 +397,21 @@ m42_node_simplify (const M42Node *n)
           m42_node_free (a);
           return inner;
         }
+      /* Minus a fraction whose top is a negative number takes the sign
+       * into the number: -(-1/u) is 1/u.  Only a number, so that this
+       * cannot undo the rule below which lifts a minus sign out of a
+       * fraction. */
+      if (a->kind == M42_NODE_BINARY && a->op == M42_TOK_SLASH &&
+          m42_node_child (a, 0)->kind == M42_NODE_NUMBER &&
+          m42_node_child (a, 0)->number < 0)
+        {
+          M42Node *top = g_ptr_array_steal_index (a->children, 0);
+          M42Node *bottom = g_ptr_array_steal_index (a->children, 0);
+
+          top->number = -top->number;
+          m42_node_free (a);
+          return simplify_and_free (m42_node_binary (M42_TOK_SLASH, top, bottom));
+        }
       /* Minus a difference is the difference the other way round, which
        * is how -(c - y) comes out as y - c. */
       if (a->kind == M42_NODE_BINARY && a->op == M42_TOK_MINUS)
@@ -641,6 +656,17 @@ m42_node_simplify (const M42Node *n)
               m42_node_free (b);
               return m42_node_number (0);
             }
+          /* The same when what is underneath is a minus sign rather
+           * than a negative number: 1/-(x + C1) is -(1/(x + C1)). */
+          if (b->kind == M42_NODE_UNARY && b->op == M42_TOK_MINUS)
+            {
+              M42Node *inner = g_ptr_array_steal_index (b->children, 0);
+
+              m42_node_free (b);
+              return simplify_and_free (
+                m42_node_unary (M42_TOK_MINUS,
+                                m42_node_binary (M42_TOK_SLASH, a, inner)));
+            }
           /* Dividing by an exponential is multiplying by the opposite
            * one, which is how C1/Exp[-x^2/2] becomes C1 Exp[x^2/2]. */
           if (b->kind == M42_NODE_CALL && b->children->len == 1 &&
@@ -831,6 +857,21 @@ m42_node_simplify (const M42Node *n)
                 m42_node_binary (M42_TOK_SLASH, m42_node_number (1),
                                  e == 1 ? a : m42_node_binary (M42_TOK_CARET, a,
                                                                m42_node_number (e))));
+            }
+          /* A minus sign under an even power goes away, and under an
+           * odd one comes out in front: (-u)^2 is u^2 and (-u)^3 is
+           * -(u^3). */
+          if (a->kind == M42_NODE_UNARY && a->op == M42_TOK_MINUS &&
+              is_number (b) && b->number == floor (b->number))
+            {
+              M42Node *inner = g_ptr_array_steal_index (a->children, 0);
+              M42Node *raised;
+
+              m42_node_free (a);
+              raised = m42_node_binary (M42_TOK_CARET, inner, b);
+              if (fmod (b->number, 2) != 0)
+                raised = m42_node_unary (M42_TOK_MINUS, raised);
+              return simplify_and_free (raised);
             }
           /* A square root squared is what was under it. */
           if (is_num (b, 2) && a->kind == M42_NODE_CALL && a->children->len == 1 &&

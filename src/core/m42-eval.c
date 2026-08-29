@@ -3417,6 +3417,116 @@ coefficient_of (const M42Node *expr, const char *name, double *out)
   return constant_fold (simple, out);
 }
 
+/* y' == f(x) y^n, which is the other equation a first course sets and
+ * the first one that is not linear.  Separating it,
+ *
+ *   INT dy/y^n = INT f dx    so   y^(1-n)/(1-n) = F(x) + C
+ *
+ * and turning that around gives y = ((1 - n)(F + C1))^(1/(1 - n)),
+ * with n = 1 the case that gives an exponential instead.  NULL when
+ * the equation is not of that shape.
+ */
+static M42Node *
+separable_power (M42Session *s, const M42Node *marked, const char *var)
+{
+  g_autoptr (M42Node) da = m42_node_differentiate (marked, "$y1");
+  g_autoptr (M42Node) a = NULL, rest = NULL, h = NULL, f = NULL, big_f = NULL;
+  double lead, n, at_one, at_two, at_three;
+
+  if (da == NULL)
+    return NULL;
+  a = m42_node_simplify (da);
+  if (!constant_fold (a, &lead) || lead == 0 || m42_node_depends_on (marked, "$y2"))
+    return NULL;
+
+  /* y' = -R/A, where R is what is left when the derivative is taken
+   * out. */
+  {
+    g_autoptr (M42Node) zero = m42_node_number (0);
+    g_autoptr (M42Node) without = m42_node_substitute (marked, "$y1", zero);
+    g_autoptr (M42Node) over = m42_node_binary (M42_TOK_SLASH,
+                                                m42_node_unary (M42_TOK_MINUS,
+                                                                m42_node_copy (without)),
+                                                m42_node_number (lead));
+
+    rest = m42_node_simplify (over);
+  }
+  if (rest == NULL || !m42_node_depends_on (rest, "$y0"))
+    return NULL;
+  h = m42_node_copy (rest);
+
+  /* Which power of y it is, read off two heights at the same place. */
+  at_two = number_at2 (s, h, var, 1.3, "$y0", 2.0);
+  at_three = number_at2 (s, h, var, 1.3, "$y0", 3.0);
+  at_one = number_at2 (s, h, var, 1.3, "$y0", 1.0);
+  if (!isfinite (at_two) || !isfinite (at_three) || !isfinite (at_one) ||
+      at_one == 0 || at_two == 0)
+    return NULL;
+  n = log (fabs (at_three / at_two)) / log (1.5);
+  if (!isfinite (n))
+    return NULL;
+  /* A power a course would write, and not a number that happens to
+   * fit. */
+  for (int den = 1; den <= 4; den++)
+    if (fabs (n * den - round (n * den)) < 1e-6)
+      {
+        n = round (n * den) / (double) den;
+        break;
+      }
+  if (fabs (n) > 8)
+    return NULL;
+
+  /* It has to be that power everywhere, not only where it was read. */
+  {
+    static const double WHERE[][2] = { { 0.7, 1.7 }, { 2.1, 0.6 }, { 1.3, 4.0 } };
+
+    for (guint i = 0; i < G_N_ELEMENTS (WHERE); i++)
+      {
+        double x = WHERE[i][0], y = WHERE[i][1];
+        double here = number_at2 (s, h, var, x, "$y0", y);
+        double flat = number_at2 (s, h, var, x, "$y0", 1.0);
+
+        if (!isfinite (here) || !isfinite (flat))
+          return NULL;
+        if (fabs (here - flat * pow (y, n)) > 1e-7 * MAX (1.0, fabs (here)))
+          return NULL;
+      }
+  }
+
+  /* f(x) is what is left when y is one. */
+  {
+    g_autoptr (M42Node) one = m42_node_number (1);
+    g_autoptr (M42Node) flat = m42_node_substitute (h, "$y0", one);
+
+    f = m42_node_simplify (flat);
+  }
+  big_f = m42_node_integrate (f, var);
+  if (big_f == NULL)
+    return NULL;
+
+  /* n of one separates into a logarithm and comes back as C1 e^F. */
+  if (fabs (n - 1) < 1e-12)
+    {
+      g_autoptr (M42Node) raised = m42_node_call1 ("Exp", m42_node_copy (big_f));
+      g_autoptr (M42Node) whole = m42_node_binary (M42_TOK_STAR, m42_node_ident ("C1"),
+                                                   g_steal_pointer (&raised));
+
+      return m42_node_simplify (whole);
+    }
+  {
+    g_autoptr (M42Node) sum = m42_node_binary (M42_TOK_PLUS, m42_node_copy (big_f),
+                                               m42_node_ident ("C1"));
+    g_autoptr (M42Node) scaled = m42_node_binary (M42_TOK_STAR,
+                                                  coefficient_node (1 - n),
+                                                  g_steal_pointer (&sum));
+    g_autoptr (M42Node) whole = m42_node_binary (M42_TOK_CARET,
+                                                 g_steal_pointer (&scaled),
+                                                 coefficient_node (1 / (1 - n)));
+
+    return m42_node_simplify (whole);
+  }
+}
+
 /* Abs[u] written as u, everywhere in a tree.  The integrating factor
  * comes out of Exp[Log[Abs[x]]] and every textbook drops the bars at
  * that step: the constant in front takes care of the sign, and
@@ -3526,15 +3636,19 @@ first_order_linear (const M42Node *marked, const char *var)
   }
 }
 
-/* An answer with one C1 in it, and a condition like y[0] == 3: the
- * answer is a line in C1, so its value at nothing and at one settle
- * which C1 it must be. */
+/* An answer with one C1 in it, and a condition like y[0] == 3.
+ *
+ * The linear answers are a line in C1 and could be settled by looking
+ * at two of them, but the ones that separate are not -- 1/-(x + C1) is
+ * not -- so the constant is looked for the way any other root is: swept
+ * for a change of sign and then closed in on.  Nothing linear about it
+ * is assumed. */
 static M42Node *
 fit_one_constant (M42Session *s, const M42Node *answer, const char *var,
                   const char *unknown, GPtrArray *conditions)
 {
   const M42Node *cond;
-  double at, want, with_zero, with_one;
+  double at, want;
 
   if (conditions->len != 1)
     return NULL;
@@ -3548,23 +3662,66 @@ fit_one_constant (M42Session *s, const M42Node *answer, const char *var,
     return NULL;
 
   {
-    g_autoptr (M42Node) zero = m42_node_number (0);
-    g_autoptr (M42Node) one = m42_node_number (1);
-    g_autoptr (M42Node) at_zero = m42_node_substitute (answer, "C1", zero);
-    g_autoptr (M42Node) at_one = m42_node_substitute (answer, "C1", one);
+    /* How far off the condition is for a given constant. */
+    double lo = -50, step = 0.01, previous = NAN, previous_c = NAN;
+    double found = NAN;
 
-    with_zero = number_at (s, at_zero, var, at);
-    with_one = number_at (s, at_one, var, at);
-  }
-  if (!isfinite (with_zero) || !isfinite (with_one) ||
-      fabs (with_one - with_zero) < 1e-14)
-    return NULL;
-  {
-    double c = (want - with_zero) / (with_one - with_zero);
-    g_autoptr (M42Node) found = coefficient_node (c);
-    g_autoptr (M42Node) filled = m42_node_substitute (answer, "C1", found);
+    for (double c = lo; c <= 50; c += step)
+      {
+        g_autoptr (M42Node) guess = coefficient_node (c);
+        g_autoptr (M42Node) filled = m42_node_substitute (answer, "C1", guess);
+        double miss = number_at (s, filled, var, at) - want;
 
-    return m42_node_simplify (filled);
+        if (!isfinite (miss))
+          {
+            previous = NAN;
+            continue;
+          }
+        if (fabs (miss) < 1e-12)
+          {
+            found = c;
+            break;
+          }
+        if (isfinite (previous) && (miss < 0) != (previous < 0))
+          {
+            /* A change of sign: close in on it. */
+            double a = previous_c, b = c;
+
+            for (int k = 0; k < 80; k++)
+              {
+                double middle = (a + b) / 2;
+                g_autoptr (M42Node) try = coefficient_node (middle);
+                g_autoptr (M42Node) here = m42_node_substitute (answer, "C1", try);
+                double there = number_at (s, here, var, at) - want;
+
+                if (!isfinite (there))
+                  break;
+                if ((there < 0) == (previous < 0))
+                  a = middle;
+                else
+                  b = middle;
+              }
+            found = (a + b) / 2;
+            break;
+          }
+        previous = miss;
+        previous_c = c;
+      }
+    if (!isfinite (found))
+      return NULL;
+    /* A constant this near a simple number is that number. */
+    for (int den = 1; den <= 12; den++)
+      if (fabs (found * den - round (found * den)) < 1e-7)
+        {
+          found = round (found * den) / den;
+          break;
+        }
+    {
+      g_autoptr (M42Node) c = coefficient_node (found);
+      g_autoptr (M42Node) filled = m42_node_substitute (answer, "C1", c);
+
+      return m42_node_simplify (filled);
+    }
   }
 }
 
@@ -3772,6 +3929,9 @@ dsolve (M42Session *s, const M42Node *call)
        * course reaches for when x appears in front of the y. */
       M42Node *by_factor = first_order_linear (marked, var);
 
+      /* Not linear in y either: it may still separate. */
+      if (by_factor == NULL)
+        by_factor = separable_power (s, marked, var);
       if (by_factor != NULL)
         {
           M42Node *fitted = fit_one_constant (s, by_factor, var, unknown, conditions);
@@ -3783,8 +3943,8 @@ dsolve (M42Session *s, const M42Node *call)
             }
           return expr_result (by_factor);
         }
-      return m42_value_error ("DSolve: the equation must be linear, and of the first "
-                              "order when its coefficients are not numbers");
+      return m42_value_error ("DSolve: math42 solves the linear equations, and the "
+                              "first order ones that separate into a power of y");
     }
 
   /* What is left when the unknown is taken out is the forcing term. */

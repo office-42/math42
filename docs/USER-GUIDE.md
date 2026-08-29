@@ -534,8 +534,19 @@ In[d3]:= DSolve[{y' == x y, y[0] == 5}, y, x] Out[d3]= 5 Exp[x^2/2]
 
 The bars of the `Abs` that comes out of `Integrate[1/x, x]` are dropped
 at that step, as every textbook drops them: the constant in front takes
-care of the sign. A first order equation that is not linear — `y' == y^2`
-— is not solved.
+care of the sign.
+
+A first order equation that is not linear but separates into a power of
+`y` is solved by separating it:
+
+```
+In[d4]:= DSolve[y' == y^2, y, x]                  Out[d4]= -(1/(x + C1))
+In[d5]:= DSolve[{y' == y^2, y[0] == 1}, y, x]     Out[d5]= -(1/(x - 1))
+In[d6]:= DSolve[y' == Sqrt[y], y, x]              Out[d6]= (x/2 + C1/2)^2
+```
+
+What is left over — `y' == y^2 + x`, and a second order equation with
+anything but a constant on its right — is not solved, and says so.
  The
 primes are written as Mathematica writes them, and conditions may
 follow in the list:
