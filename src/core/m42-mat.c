@@ -326,6 +326,112 @@ read_matrix (Reader *r, gsize end, char **name)
   return value;
 }
 
+/* The level 4 file, which MATLAB wrote before 1996 and still writes
+ * when asked for -v4, and which many an old data set is kept in.  It
+ * has no header at all: a variable is five numbers -- what kind, how
+ * many rows, how many columns, whether it is complex, and how long its
+ * name is -- then the name, then the numbers a column at a time.
+ *
+ * The first of the five is written MOPT: a thousand for the machine
+ * that wrote it, a hundred for nothing, ten for the kind of number,
+ * and one for whether it is text. */
+static M42Value *
+read_level_four (Reader *r, GStrv *names, GError **error)
+{
+  M42Value *found = m42_value_list_new ();
+  g_autoptr (GPtrArray) got_names = g_ptr_array_new ();
+  guint how_many = 0;
+
+  while (r->at + 20 <= r->len)
+    {
+      guint32 mopt = read32 (r);
+      guint32 rows = read32 (r);
+      guint32 cols = read32 (r);
+      guint32 complex_too = read32 (r);
+      guint32 namelen = read32 (r);
+      guint32 kind;
+      g_autofree char *name = NULL;
+      gsize how_long;
+
+      /* M must be 0 or 1, O must be 0, P at most 5 and T at most 2. */
+      if (mopt > 4052 || (mopt / 1000) > 1 || ((mopt / 100) % 10) != 0 ||
+          ((mopt / 10) % 10) > 5 || (mopt % 10) > 2)
+        break;
+      if (namelen == 0 || namelen > 1024 || rows > 1u << 24 || cols > 1u << 24)
+        break;
+      r->swap = (mopt / 1000) == 1;
+
+      switch ((mopt / 10) % 10)
+        {
+        case 1:  kind = MI_SINGLE; break;
+        case 2:  kind = MI_INT32;  break;
+        case 3:  kind = MI_INT16;  break;
+        case 4:  kind = MI_UINT16; break;
+        case 5:  kind = MI_UINT8;  break;
+        default: kind = MI_DOUBLE; break;
+        }
+
+      if (r->at + namelen > r->len)
+        break;
+      name = g_strndup ((const char *) r->data + r->at, namelen);
+      r->at += namelen;
+
+      how_long = (gsize) rows * cols;
+      if (how_long == 0 || r->at + how_long * size_of (kind) > r->len)
+        break;
+      {
+        g_autofree double *numbers = g_new0 (double, how_long);
+        M42Value *value;
+
+        for (gsize i = 0; i < how_long; i++)
+          numbers[i] = read_number (r, kind);
+        if (complex_too)
+          for (gsize i = 0; i < how_long && r->at < r->len; i++)
+            read_number (r, kind);
+
+        if ((mopt % 10) == 1)
+          {
+            g_autoptr (GString) text = g_string_new (NULL);
+
+            for (gsize i = 0; i < how_long; i++)
+              if ((gunichar) numbers[i] != 0)
+                g_string_append_unichar (text, (gunichar) numbers[i]);
+            value = m42_value_string (text->str);
+          }
+        else if (rows == 1 || cols == 1)
+          {
+            if (how_long == 1)
+              value = m42_value_number (numbers[0]);
+            else
+              {
+                value = m42_value_list_new ();
+                for (gsize i = 0; i < how_long; i++)
+                  m42_value_list_append (value, m42_value_number (numbers[i]));
+              }
+          }
+        else
+          value = rows_from_columns (numbers, rows, cols);
+
+        g_ptr_array_add (got_names, g_strdup (name));
+        m42_value_list_append (found, value);
+        how_many++;
+      }
+    }
+
+  g_ptr_array_add (got_names, NULL);
+  if (how_many == 0)
+    {
+      m42_value_unref (found);
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+                   "not a MAT file math42 can read: it holds no level 4 variables "
+                   "and does not begin as a level 5 file does");
+      return NULL;
+    }
+  if (names != NULL)
+    *names = (GStrv) g_ptr_array_free (g_steal_pointer (&got_names), FALSE);
+  return found;
+}
+
 M42Value *
 m42_mat_read (const char *path, GStrv *names, GError **error)
 {
@@ -337,24 +443,28 @@ m42_mat_read (const char *path, GStrv *names, GError **error)
 
   if (!g_file_get_contents (path, &contents, &length, error))
     return NULL;
-  if (length < 128)
+  if (length < 20)
     {
       g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
                    "%s is too short to be a MAT file", path);
       return NULL;
     }
-  if (strncmp (contents, "MATLAB 5.0 MAT-file", 19) != 0)
-    {
-      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
-                   "%s is not a level 5 MAT file; math42 does not read the older "
-                   "level 4 kind or the HDF5 files -v7.3 writes", path);
-      return NULL;
-    }
-
   r.data = (const guint8 *) contents;
   r.len = length;
-  r.at = 126;
+  r.at = 0;
   r.swap = FALSE;
+
+  /* A level 4 file begins with a variable rather than with a line of
+   * text saying what it is. */
+  if (strncmp (contents, "MATLAB 5.0 MAT-file", 19) != 0)
+    {
+      M42Value *older = read_level_four (&r, names, error);
+
+      if (older == NULL && error != NULL && *error != NULL)
+        g_prefix_error (error, "%s: ", path);
+      return older;
+    }
+  r.at = 126;
   {
     /* Two letters near the end of the header say which way round the
      * numbers are: IM as written, MI when they need turning. */

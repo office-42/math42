@@ -22,6 +22,7 @@
 #include "m42-matrix.h"
 #include "m42-help.h"
 #include "m42-mat.h"
+#include "m42-format.h"
 #include "m42-pattern.h"
 
 #include <complex.h>
@@ -14497,6 +14498,27 @@ import_file (const char *path, const char *what)
 
   if (!g_file_get_contents (path, &contents, NULL, &error))
     return m42_value_error ("%s: %s", what, error->message);
+
+  /* A notebook, or a script in either language, comes back as the
+   * lines it holds: a MATLAB script's comments and continuations are
+   * put right, and a Mathematica notebook's cells are read out of the
+   * boxes they are written in.  Anything else is the text it is. */
+  if (g_str_has_suffix (lower, ".m42") || g_str_has_suffix (lower, ".m") ||
+      g_str_has_suffix (lower, ".nb") || g_str_has_suffix (lower, ".wl") ||
+      g_str_has_suffix (lower, ".wls"))
+    {
+      g_autofree char *plain = m42_format_read (contents, m42_format_for_path (path));
+      g_auto (GStrv) lines = g_strsplit (plain, "\n", -1);
+      M42Value *out = m42_value_list_new ();
+
+      for (guint i = 0; lines[i] != NULL; i++)
+        {
+          g_strstrip (lines[i]);
+          if (lines[i][0] != '\0')
+            m42_value_list_append (out, m42_value_string (lines[i]));
+        }
+      return out;
+    }
 
   as_table = g_str_has_suffix (lower, ".csv") || g_str_has_suffix (lower, ".tsv") ||
              g_str_has_suffix (lower, ".dat") || strcmp (what, "csvread") == 0 ||

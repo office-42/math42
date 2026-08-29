@@ -140,11 +140,16 @@ In[m2]:= load("run.mat")     Out[m2]= {"A" -> {{1, 2}, {3, 4}}, "v" -> {1, 2, 3}
 
 A file of one variable comes back as that variable; several come back
 as the rules `name -> value`. math42 reads the level 5 files every
-MATLAB since 1996 writes, compressed (version 7) or not, and writes
-uncompressed ones of the same kind, which MATLAB, Octave and SciPy all
-read. It does not read the HDF5 files `-v7.3` writes, and holds
-matrices of numbers and strings but not cells, structures or
-objects. An expression
+MATLAB since 1996 writes, compressed (version 7) or not, and the older
+level 4 files as well; it writes uncompressed level 5 ones, which
+MATLAB, Octave and SciPy all read. It does not read the HDF5 files
+`-v7.3` writes, and holds matrices of numbers and strings but not
+cells, structures or objects.
+
+`Import` of a notebook or a script — `.m42`, `.m`, `.wl`, `.wls`,
+`.nb` — gives the lines it holds, a MATLAB script's comments and
+continuations put right and a Mathematica notebook's cells read out of
+the boxes they are written in. `ToExpression` runs one of them. An expression
 spread over several lines is put back together as the file is read.
 
 From a terminal, `math42-calc script.m` runs any of them, and

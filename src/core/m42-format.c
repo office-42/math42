@@ -643,7 +643,14 @@ notebook_write (const char *inputs, const char *const *outputs)
           g_string_append_printf (out, "], \"Output\", CellLabel->\"Out[%u]=\"]", n);
         }
     }
-  g_string_append (out, "\n}]\n");
+  /* The options a front end expects after the cells: how big to open
+   * the window and which stylesheet to set the page in.  A notebook
+   * without them opens, but looks like a file somebody made up rather
+   * than one Mathematica wrote. */
+  g_string_append (out, "\n},\n");
+  g_string_append (out, "WindowSize->{800, 1000},\n");
+  g_string_append (out, "WindowMargins->{{Automatic, 0}, {Automatic, 0}},\n");
+  g_string_append (out, "StyleDefinitions->\"Default.nb\"\n]\n");
   return g_string_free (out, FALSE);
 }
 
