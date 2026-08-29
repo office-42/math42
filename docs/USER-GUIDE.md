@@ -615,6 +615,21 @@ from the table a course hands out — `1`, `n`, `n^2`, `a^n`, `n a^n`,
 partial fractions, which handles a repeated pole as well as a simple
 one.
 
+`FourierTransform[f, t, w]` and `InverseFourierTransform` read a table
+of their own, in Mathematica's convention — `F(w) = 1/Sqrt[2 Pi]` times
+the integral, which is where the `Sqrt[2 Pi]` in every answer comes
+from. `Exp[-a Abs[t]]`, `Exp[-a t^2]`, `1/(a^2 + t^2)`, `Sin[a t]`,
+`Cos[a t]` and `DiracDelta` are what is in it; the last three answer
+with `DiracDelta`, which math42 carries about as a name and does not
+try to work out.
+
+```
+In[f1]:= FourierTransform[Exp[-3 Abs[t]], t, w]  Out[f1]= 3 Sqrt[2/Pi]/(9 + w^2)
+In[f2]:= FourierTransform[Exp[-2 t^2], t, w]     Out[f2]= Exp[-(w^2/8)]/2
+In[f3]:= FourierTransform[Cos[3 t], t, w]
+         Out[f3]= Sqrt[Pi/2] (DiracDelta[w - 3] + DiracDelta[w + 3])
+```
+
 ```
 In[z1]:= ZTransform[n 2^n, n, z]              Out[z1]= 2 z/(z - 2)^2
 In[z2]:= InverseZTransform[z/(z^2 - 3z + 2), z, n]   Out[z2]= -1 + 2^n

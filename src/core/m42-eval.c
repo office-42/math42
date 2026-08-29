@@ -3870,8 +3870,19 @@ polynomial_gcd (const GArray *first, const GArray *second, GArray *out)
   g_array_set_size (b, second->len);
   memcpy (b->data, second->data, sizeof (double) * second->len);
 
-  for (int guard = 0; guard < 64 && b->len > 1; guard++)
+  /* Euclid runs until the remainder is nothing at all, not until it
+   * is a constant.  Stopping at a constant answers gcd(x, 8) with x,
+   * and then Cancel divides 8 by x and reports that x/8 is infinite,
+   * which is what it used to do. */
+  for (int guard = 0; guard < 64; guard++)
     {
+      gboolean nothing = TRUE;
+
+      for (guint i = 0; i < b->len && nothing; i++)
+        if (fabs (g_array_index (b, double, i)) > 1e-12)
+          nothing = FALSE;
+      if (nothing)
+        break;
       m42_polynomial_divide (a, b, q, r);
       g_array_set_size (a, b->len);
       memcpy (a->data, b->data, sizeof (double) * b->len);
@@ -5621,6 +5632,121 @@ plot3d (M42Session *s, const M42Node *call, gboolean flat)
       }
   }
   return out;
+}
+
+/* --- the Fourier transform -----------------------------------------------
+ *
+ * The table a course hands out, written as the rules it is:
+ *
+ *   Exp[-a |t|]    Sqrt[2/Pi] a/(a^2 + w^2)
+ *   Exp[-a t^2]    Exp[-w^2/(4 a)]/Sqrt[2 a]
+ *   1/(a^2 + t^2)  Sqrt[Pi/2] Exp[-a |w|]/a
+ *   1              Sqrt[2 Pi] DiracDelta[w]
+ *   Cos[a t]       Sqrt[Pi/2] (DiracDelta[w - a] + DiracDelta[w + a])
+ *   Sin[a t]       I Sqrt[Pi/2] (DiracDelta[w + a] - DiracDelta[w - a])
+ *
+ * with the convention Mathematica uses, F(w) = 1/Sqrt[2 Pi] INT f(t)
+ * e^(-i w t) dt, which is where every Sqrt[2 Pi] below comes from.
+ *
+ * The rules are matched with the same matcher /. uses, so the table
+ * reads as the mathematics it is rather than as a tree walk.  The
+ * letter a in a rule must not itself hold the variable, which the
+ * matcher cannot say and is checked after it.
+ */
+/* One word swapped for another, everywhere it appears. */
+static char *
+with_name (const char *text, const char *mark, const char *name)
+{
+  g_auto (GStrv) pieces = g_strsplit (text, mark, -1);
+
+  return g_strjoinv (name, pieces);
+}
+
+static M42Value *
+fourier_transform (M42Session *s, const M42Node *call, gboolean inverse)
+{
+  static const char *const TABLE[] = {
+    /* A number in front of the variable is folded into the number by
+     * the time the rule sees it, so these are written the way they
+     * arrive -- with A negative, which the condition says. */
+    "Exp[A_ Abs[%t]] /; A < 0 -> Sqrt[2/Pi] (-A)/(A^2 + %w^2)",
+    "Exp[-Abs[%t]] -> Sqrt[2/Pi]/(1 + %w^2)",
+    "Exp[A_ %t^2] /; A < 0 -> Exp[%w^2/(4 A)]/Sqrt[-2 A]",
+    "Exp[-%t^2] -> Exp[-%w^2/4]/Sqrt[2]",
+    "1/(A_ + %t^2) -> Sqrt[Pi/2] Exp[-Sqrt[A] Abs[%w]]/Sqrt[A]",
+    "Cos[A_ %t] -> Sqrt[Pi/2] (DiracDelta[%w - A] + DiracDelta[%w + A])",
+    "Sin[A_ %t] -> I Sqrt[Pi/2] (DiracDelta[%w + A] - DiracDelta[%w - A])",
+    "Cos[%t] -> Sqrt[Pi/2] (DiracDelta[%w - 1] + DiracDelta[%w + 1])",
+    "Sin[%t] -> I Sqrt[Pi/2] (DiracDelta[%w + 1] - DiracDelta[%w - 1])",
+    "DiracDelta[%t] -> 1/Sqrt[2 Pi]",
+  };
+  const char *who = inverse ? "InverseFourierTransform" : "FourierTransform";
+  const M42Node *from, *to;
+  g_autoptr (M42Node) f = NULL;
+
+  if (call->children->len != 3)
+    return m42_value_error ("%s expects f, the name it is in, and the name to give", who);
+  from = m42_node_child (call, 1);
+  to = m42_node_child (call, 2);
+  if (from->kind != M42_NODE_IDENT || to->kind != M42_NODE_IDENT)
+    return m42_value_error ("%s expects two names", who);
+  f = symbolic_argument (s, m42_node_child (call, 0), from->name);
+
+  for (guint i = 0; i < G_N_ELEMENTS (TABLE); i++)
+    {
+      g_autofree char *with_t = NULL;
+      g_autofree char *text = NULL;
+      g_autofree char *complaint = NULL;
+      g_autoptr (M42Node) rule = NULL;
+      g_autoptr (GHashTable) names = m42_pattern_names_new ();
+      const M42Node *use;
+
+      /* The inverse reads the same table the other way round, which is
+       * what makes it an inverse. */
+      with_t = with_name (TABLE[i], "%t", inverse ? to->name : from->name);
+      text = with_name (with_t, "%w", inverse ? from->name : to->name);
+      rule = m42_parse (text, &complaint);
+      use = rule;
+      while (use != NULL && use->kind == M42_NODE_SEQ && use->children->len == 1)
+        use = m42_node_child (use, 0);
+      if (use == NULL || use->kind != M42_NODE_RULE)
+        continue;
+
+      {
+        const M42Node *shape = m42_node_child (use, inverse ? 1 : 0);
+        const M42Node *gives = m42_node_child (use, inverse ? 0 : 1);
+
+        /* Read backwards, the side with the condition on it is the
+         * answer, and a condition is not part of an answer. */
+        if (gives->kind == M42_NODE_CONDITION)
+          gives = m42_node_child (gives, 0);
+        if (shape->kind == M42_NODE_CONDITION && inverse)
+          shape = m42_node_child (shape, 0);
+
+        if (!m42_node_match (shape, f, names, pattern_test, s))
+          continue;
+        /* A letter in the rule that swallowed the variable itself has
+         * matched something the rule did not mean. */
+        {
+          GHashTableIter iter;
+          gpointer key, value;
+          gboolean honest = TRUE;
+
+          g_hash_table_iter_init (&iter, names);
+          while (g_hash_table_iter_next (&iter, &key, &value))
+            if (m42_node_depends_on (value, inverse ? to->name : from->name))
+              honest = FALSE;
+          if (!honest)
+            continue;
+        }
+        {
+          g_autoptr (M42Node) filled = m42_node_bind (gives, names);
+
+          return expr_result (m42_node_simplify (filled));
+        }
+      }
+    }
+  return m42_value_error ("%s: that one is not in the table", who);
 }
 
 /* VectorPlot[{fx, fy}, {x, a, b}, {y, c, d}]: which way a field points
@@ -11561,6 +11687,10 @@ eval_call (M42Session *s, const M42Node *n)
     }
   /* ZTransform[f, n, z]: the sequence is looked at as it was written,
    * so that n and z both stay names. */
+  if (name_is (name, "FourierTransform", NULL) ||
+      name_is (name, "InverseFourierTransform", NULL))
+    return fourier_transform (s, n, name_is (name, "InverseFourierTransform", NULL));
+
   if (name_is (name, "InverseZTransform", NULL) && n->children->len == 3)
     {
       const M42Node *from = m42_node_child (n, 1), *to = m42_node_child (n, 2);

@@ -641,6 +641,14 @@ m42_node_simplify (const M42Node *n)
               m42_node_free (b);
               return m42_node_number (0);
             }
+          /* A minus sign underneath comes up in front, where it can
+           * be read: w^2/(-8) is -(w^2/8). */
+          if (is_number (b) && b->number < 0)
+            {
+              b->number = -b->number;
+              return simplify_and_free (
+                m42_node_unary (M42_TOK_MINUS, m42_node_binary (M42_TOK_SLASH, a, b)));
+            }
           /* A minus sign on top is written in front of the whole
            * fraction, so that what is left can cancel: -(2 Sqrt[a])/2
            * becomes -Sqrt[a]. */
@@ -837,6 +845,23 @@ m42_node_simplify (const M42Node *n)
   r->name = g_strdup (n->name);
   for (guint i = 0; i < n->children->len; i++)
     g_ptr_array_add (r->children, m42_node_simplify (m42_node_child (n, i)));
+
+  /* Sqrt of a perfect square is the number it is, so that a table
+   * which writes Sqrt[2 A] does not leave Sqrt[4] standing when A is
+   * two. */
+  if (r->kind == M42_NODE_CALL && r->children->len == 1 &&
+      (strcmp (r->name, "Sqrt") == 0 || strcmp (r->name, "sqrt") == 0) &&
+      m42_node_child (r, 0)->kind == M42_NODE_NUMBER)
+    {
+      double under = m42_node_child (r, 0)->number;
+      double root = sqrt (under);
+
+      if (under >= 0 && root == floor (root))
+        {
+          m42_node_free (r);
+          return m42_node_number (root);
+        }
+    }
 
   /* A square inside a square root comes outside it: Sqrt[4 a] is
    * 2 Sqrt[a], which is what turns the roots of x^2 == a into
