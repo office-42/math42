@@ -606,6 +606,8 @@ In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + 1/2 u^2 + 1/6 u^3 + 1/24
 | `Expand[e]` | multiplies out and gathers like terms |
 | `Factor[p]` | a polynomial as a product of its factors |
 | `Simplify[e]`, `FullSimplify[e]` | the identities, the cancelling and the multiplying out, whichever comes out shorter |
+| `Simplify[e, x > 0]`, `Refine[e, x > 0]` | with what may be assumed about a letter: `Simplify[Sqrt[x^2], x > 0]` is `x`, and `x < 0` makes it `-x`. The assumptions understood are the inequalities against nothing, singly, in a list, or joined with `&&` |
+| `Assuming[x > 0, body]` | the same assumption handed to every `Simplify`, `Refine` and `PowerExpand` inside the body |
 | `Cancel[e]` | a fraction with whatever divides both halves taken off |
 | `TrigReduce[e]` | products and powers of waves as a sum of plain waves: `Sin[x] Cos[x]` is `Sin[2 x]/2` |
 | `TrigExpand[e]` | the other way: `Sin[x + y]` is `Sin[x] Cos[y] + Cos[x] Sin[y]`, and `Sin[2 x]` is `2 Sin[x] Cos[x]` |
@@ -1142,9 +1144,12 @@ Said plainly, so nothing surprises you:
   constant coefficients and anything on the right it can integrate
   twice, and a first order one that separates into a power of `y`.
   `RSolve` handles a linear recurrence with constant coefficients.
-  Beyond those there is no `Reduce`, no `Assuming`, no system of
-  differential equations, no partial differential equations, and no
-  modular arithmetic in an equation.
+  Beyond those there is no `Reduce`, no system of differential
+  equations, no partial differential equations, and no modular
+  arithmetic in an equation. `Assuming` and the second argument of
+  `Simplify` understand the inequalities against nothing — `x > 0`
+  and its three companions — and nothing else: there is no way to say
+  that a letter is real, or an integer, or lies between two numbers.
 - **Symbolic integration beyond the rules listed above.** The special
   functions that are there — `Gamma`, `Beta`, `Erf`, `Erfc`, `Zeta`,
   `BesselJ`, `BesselY`, `LegendreP`, `HermiteH` — are numeric, and

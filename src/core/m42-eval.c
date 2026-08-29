@@ -4675,6 +4675,258 @@ power_expand (M42Session *s, const M42Node *tree)
   return simplify_hard (s, opened);
 }
 
+/* --- what a letter is allowed to be -----------------------------------
+ *
+ * Mathematica lets one say x > 0 and have Sqrt[x^2] come out as x
+ * rather than Abs[x].  The assumptions math42 understands are the
+ * inequalities against nothing -- x > 0, x >= 0, x < 0, x <= 0 -- and
+ * that is enough for the rules that need one: the square root of a
+ * square, the bars of an Abs, the sign, and taking a logarithm apart.
+ */
+
+/* The conditions written out flat, whether they came as one, as a
+ * list, or as a chain of &&. */
+static void
+gather_conditions (const M42Node *n, GPtrArray *out)
+{
+  if (n == NULL)
+    return;
+  if (n->kind == M42_NODE_LIST ||
+      (n->kind == M42_NODE_BINARY && n->op == M42_TOK_AND))
+    {
+      for (guint i = 0; i < n->children->len; i++)
+        gather_conditions (m42_node_child (n, i), out);
+      return;
+    }
+  g_ptr_array_add (out, (gpointer) n);
+}
+
+/* +1 when the expression is known to be above nothing, -1 when below,
+ * and 0 when nothing said so. */
+static int
+known_sign (GPtrArray *conditions, const M42Node *u)
+{
+  double x;
+
+  if (u == NULL)
+    return 0;
+  if (constant_fold (u, &x) && isfinite (x))
+    return x > 0 ? 1 : x < 0 ? -1 : 0;
+
+  /* A letter that one of the conditions speaks about. */
+  if (u->kind == M42_NODE_IDENT)
+    for (guint i = 0; i < conditions->len; i++)
+      {
+        const M42Node *c = g_ptr_array_index (conditions, i);
+        const M42Node *left, *right;
+        double against;
+
+        if (c->kind != M42_NODE_BINARY)
+          continue;
+        if (c->op != M42_TOK_GT && c->op != M42_TOK_GE &&
+            c->op != M42_TOK_LT && c->op != M42_TOK_LE)
+          continue;
+        left = m42_node_child (c, 0);
+        right = m42_node_child (c, 1);
+        if (left->kind != M42_NODE_IDENT || strcmp (left->name, u->name) != 0)
+          continue;
+        if (!constant_fold (right, &against) || against != 0)
+          continue;
+        if (c->op == M42_TOK_GT)
+          return 1;
+        if (c->op == M42_TOK_GE)
+          return 1;
+        return -1;
+      }
+
+  /* Exp is above nothing whatever is inside it, and a product or a
+   * quotient goes by the signs of its halves. */
+  if (u->kind == M42_NODE_CALL && u->children->len == 1 &&
+      (strcmp (u->name, "Exp") == 0 || strcmp (u->name, "exp") == 0))
+    return 1;
+  if (u->kind == M42_NODE_BINARY &&
+      (u->op == M42_TOK_STAR || u->op == M42_TOK_SLASH))
+    {
+      int a = known_sign (conditions, m42_node_child (u, 0));
+      int b = known_sign (conditions, m42_node_child (u, 1));
+
+      return a == 0 || b == 0 ? 0 : a * b;
+    }
+  if (u->kind == M42_NODE_UNARY && u->op == M42_TOK_MINUS)
+    return -known_sign (conditions, m42_node_child (u, 0));
+  return 0;
+}
+
+/* The rules that need to know a sign, applied everywhere in a tree. */
+static M42Node *
+refine_tree (M42Session *s, const M42Node *n, GPtrArray *conditions)
+{
+  M42Node *out;
+
+  if (n == NULL)
+    return NULL;
+  out = m42_node_copy (n);
+  if (out->children != NULL)
+    for (guint i = 0; i < out->children->len; i++)
+      {
+        M42Node *child = g_ptr_array_index (out->children, i);
+        M42Node *done = refine_tree (s, child, conditions);
+
+        g_ptr_array_index (out->children, i) = done;
+        m42_node_free (child);
+      }
+
+  /* Abs[u] is u when u is above nothing, and -u when below. */
+  if (out->kind == M42_NODE_CALL && out->children->len == 1 &&
+      (strcmp (out->name, "Abs") == 0 || strcmp (out->name, "abs") == 0))
+    {
+      int sign = known_sign (conditions, m42_node_child (out, 0));
+
+      if (sign != 0)
+        {
+          M42Node *inside = g_ptr_array_steal_index (out->children, 0);
+
+          m42_node_free (out);
+          return sign > 0 ? inside : m42_node_unary (M42_TOK_MINUS, inside);
+        }
+    }
+  /* Sign[u] likewise. */
+  if (out->kind == M42_NODE_CALL && out->children->len == 1 &&
+      (strcmp (out->name, "Sign") == 0 || strcmp (out->name, "sign") == 0))
+    {
+      int sign = known_sign (conditions, m42_node_child (out, 0));
+
+      if (sign != 0)
+        {
+          m42_node_free (out);
+          return m42_node_number (sign);
+        }
+    }
+  /* Sqrt[u^2] is u, and Sqrt[u]^2 is u, when u is above nothing. */
+  if (out->kind == M42_NODE_CALL && out->children->len == 1 &&
+      (strcmp (out->name, "Sqrt") == 0 || strcmp (out->name, "sqrt") == 0))
+    {
+      const M42Node *inside = m42_node_child (out, 0);
+      double power;
+
+      if (inside->kind == M42_NODE_BINARY && inside->op == M42_TOK_CARET &&
+          constant_fold (m42_node_child (inside, 1), &power) && power == 2 &&
+          known_sign (conditions, m42_node_child (inside, 0)) != 0)
+        {
+          int sign = known_sign (conditions, m42_node_child (inside, 0));
+          M42Node *under = m42_node_copy (m42_node_child (inside, 0));
+
+          m42_node_free (out);
+          return sign > 0 ? under : m42_node_unary (M42_TOK_MINUS, under);
+        }
+    }
+  /* Log[u v] and Log[u^n] come apart when the pieces are positive. */
+  if (out->kind == M42_NODE_CALL && out->children->len == 1 &&
+      (strcmp (out->name, "Log") == 0 || strcmp (out->name, "log") == 0))
+    {
+      const M42Node *inside = m42_node_child (out, 0);
+
+      if (inside->kind == M42_NODE_BINARY && inside->op == M42_TOK_STAR &&
+          known_sign (conditions, m42_node_child (inside, 0)) > 0 &&
+          known_sign (conditions, m42_node_child (inside, 1)) > 0)
+        {
+          M42Node *sum = m42_node_binary (M42_TOK_PLUS,
+            m42_node_call1 (out->name, m42_node_copy (m42_node_child (inside, 0))),
+            m42_node_call1 (out->name, m42_node_copy (m42_node_child (inside, 1))));
+
+          m42_node_free (out);
+          return sum;
+        }
+      if (inside->kind == M42_NODE_BINARY && inside->op == M42_TOK_CARET &&
+          known_sign (conditions, m42_node_child (inside, 0)) > 0)
+        {
+          M42Node *times = m42_node_binary (M42_TOK_STAR,
+            m42_node_copy (m42_node_child (inside, 1)),
+            m42_node_call1 (out->name, m42_node_copy (m42_node_child (inside, 0))));
+
+          m42_node_free (out);
+          return times;
+        }
+    }
+  /* (u^a)^b is u^(a b) when u is positive, and Sqrt[u]^2 is u. */
+  if (out->kind == M42_NODE_BINARY && out->op == M42_TOK_CARET)
+    {
+      const M42Node *base = m42_node_child (out, 0);
+      double power;
+
+      if (base->kind == M42_NODE_CALL && base->children->len == 1 &&
+          (strcmp (base->name, "Sqrt") == 0 || strcmp (base->name, "sqrt") == 0) &&
+          constant_fold (m42_node_child (out, 1), &power) && power == 2 &&
+          known_sign (conditions, m42_node_child (base, 0)) > 0)
+        {
+          M42Node *under = m42_node_copy (m42_node_child (base, 0));
+
+          m42_node_free (out);
+          return under;
+        }
+
+      if (base->kind == M42_NODE_BINARY && base->op == M42_TOK_CARET &&
+          known_sign (conditions, m42_node_child (base, 0)) > 0)
+        {
+          M42Node *inner = m42_node_binary (M42_TOK_STAR,
+            m42_node_copy (m42_node_child (base, 1)),
+            m42_node_copy (m42_node_child (out, 1)));
+          M42Node *whole = m42_node_binary (M42_TOK_CARET,
+            m42_node_copy (m42_node_child (base, 0)), inner);
+
+          m42_node_free (out);
+          return whole;
+        }
+    }
+  return out;
+}
+
+/* Assuming[x > 0, body] works by handing the condition to every
+ * Simplify, FullSimplify, Refine and PowerExpand inside the body,
+ * which is what Mathematica's $Assumptions amounts to.  Doing it as a
+ * rewrite of the tree rather than as a setting means nothing has to
+ * remember to put the setting back. */
+static M42Node *
+hand_down_assumption (const M42Node *n, const M42Node *given)
+{
+  static const char *const READS_IT[] = { "Simplify", "simplify", "FullSimplify",
+                                          "Refine", "PowerExpand" };
+  M42Node *out;
+
+  if (n == NULL)
+    return NULL;
+  out = m42_node_copy (n);
+  if (out->children != NULL)
+    for (guint i = 0; i < out->children->len; i++)
+      {
+        M42Node *child = g_ptr_array_index (out->children, i);
+        M42Node *done = hand_down_assumption (child, given);
+
+        g_ptr_array_index (out->children, i) = done;
+        m42_node_free (child);
+      }
+  if (out->kind == M42_NODE_CALL && out->children->len == 1)
+    for (guint i = 0; i < G_N_ELEMENTS (READS_IT); i++)
+      if (strcmp (out->name, READS_IT[i]) == 0)
+        {
+          g_ptr_array_add (out->children, m42_node_copy (given));
+          break;
+        }
+  return out;
+}
+
+/* Everything above, and then the ordinary shortening. */
+static M42Node *
+refine_with (M42Session *s, const M42Node *tree, const M42Node *given)
+{
+  g_autoptr (GPtrArray) conditions = g_ptr_array_new ();
+  g_autoptr (M42Node) refined = NULL;
+
+  gather_conditions (given, conditions);
+  refined = refine_tree (s, tree, conditions);
+  return simplify_hard (s, refined);
+}
+
 /* One solution of a y'' + b y' + c y == R(x), with the two solutions of
  * the homogeneous equation already in hand:
  *
@@ -13345,6 +13597,29 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       return expr_result (trig_expand (s, written));
     }
 
+  /* With a condition after it, the rules that need to know a sign are
+   * allowed to take: Simplify[Sqrt[x^2], x > 0] is x. */
+  if ((name_is (name, "Simplify", "simplify") || name_is (name, "FullSimplify", NULL) ||
+       name_is (name, "Refine", NULL)) && args->len == 2)
+    {
+      g_autoptr (M42Node) written = value_to_node (ARG (0));
+      g_autoptr (M42Node) given = value_to_node (ARG (1));
+
+      if (written == NULL)
+        return m42_value_ref (ARG (0));
+      if (given == NULL)
+        return m42_value_error ("%s: the second argument is what may be assumed", name);
+      return expr_result (refine_with (s, written, given));
+    }
+  if (name_is (name, "Refine", NULL) && args->len == 1)
+    {
+      g_autoptr (M42Node) written = value_to_node (ARG (0));
+
+      if (written == NULL)
+        return m42_value_ref (ARG (0));
+      return expr_result (simplify_hard (s, written));
+    }
+
   if ((name_is (name, "Simplify", "simplify") ||
        name_is (name, "FullSimplify", NULL)) && args->len == 1)
     {
@@ -14136,6 +14411,15 @@ eval_call (M42Session *s, const M42Node *n)
       name_is (name, "DensityPlot", NULL))
     return plot3d (s, n, name_is (name, "DensityPlot", NULL));
   if (name_is (name, "PolarPlot", "polarplot")) return parametric_plot (s, n, TRUE);
+  if (name_is (name, "Assuming", NULL) && n->children->len == 2)
+    {
+      g_autoptr (M42Node) body = hand_down_assumption (m42_node_child (n, 1),
+                                                       m42_node_child (n, 0));
+
+      if (body == NULL)
+        return m42_value_error ("Assuming expects a condition and something to work out");
+      return eval (s, body);
+    }
   if (name_is (name, "Residue", NULL))
     return residue (s, n);
   if (name_is (name, "FindFit", "lsqcurvefit"))

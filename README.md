@@ -70,7 +70,8 @@ letters still in it. `Expand`
 multiplies out and gathers like terms, `Series[Sin[x], {x, 0, 7}]`
 gives the Taylor polynomial, `Limit[Sin[x]/x, x -> 0]` is 1,
 `Factor[x^3 - 6x^2 + 11x - 6]` is `(x - 1) (x - 2) (x - 3)`,
-`Simplify` folds constants and drops the identities,
+`Simplify` folds constants and drops the identities, and takes what
+may be assumed — `Simplify[Sqrt[x^2], x > 0]` is `x` —
 `TrigReduce` writes a product of waves as a sum of waves and
 `TrigExpand` writes it back, `Minimize[x^2 - x, x]` is
 `{-1/4, {x -> 1/2}}`, and `expr /. x -> 2` (MATLAB's `subs`) puts numbers in.

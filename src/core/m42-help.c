@@ -53,6 +53,8 @@ static const M42Function FUNCTIONS[] = {
   { "Collect", "collect", "Collect[e, x]", "gathered by the powers of x", "Algebra" },
   { "Together", NULL, "Together[e]", "a sum of fractions written over one denominator", "Algebra" },
   { "Apart", "partfrac", "Apart[e, x]", "a fraction split into partial fractions", "Algebra" },
+  { "Refine", NULL, "Refine[e, x > 0]", "the expression with what may be assumed taken into account", "Algebra" },
+  { "Assuming", NULL, "Assuming[x > 0, Simplify[e]]", "the assumption handed to every Simplify and Refine inside", "Algebra" },
   { "TrigReduce", NULL, "TrigReduce[e]", "products and powers of waves as a sum of plain waves", "Algebra" },
   { "TrigExpand", NULL, "TrigExpand[e]", "Sin[x + y] and Sin[2 x] written out in waves of x and y", "Algebra" },
   { "TrigToExp", NULL, "TrigToExp[e]", "waves written as exponentials, which is what Euler's formula says they are", "Algebra" },
