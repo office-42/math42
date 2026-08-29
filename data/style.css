@@ -1,0 +1,25 @@
+/* math42 - the look of a notebook.
+ *
+ * Copyright (C) 2026 The math42 authors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+window.m42 {
+  background: #ffffff;
+}
+
+.m42-notebook {
+  background: #ffffff;
+}
+
+.m42-input {
+  font-family: "Cascadia Mono", "DejaVu Sans Mono", "Menlo", monospace;
+  font-size: 13px;
+}
+
+.m42-statusbar {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #555555;
+  border-top: 1px solid #d0d0d0;
+}

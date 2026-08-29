@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="8" y="8" width="112" height="112" rx="14" fill="#1d3557"/>
+  <text x="58" y="88" text-anchor="middle" font-family="serif" font-style="italic" font-size="76" fill="#f1faee">f</text>
+  <text x="96" y="112" text-anchor="middle" font-family="sans-serif" font-weight="bold" font-size="26" fill="#e63946">42</text>
+</svg>

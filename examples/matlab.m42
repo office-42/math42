@@ -1,0 +1,22 @@
+(* The same program answering to MATLAB's names and brackets. *)
+A = [1 2; 3 4]
+det(A)
+inv(A)
+A \ [1; 2]
+eig(A)
+[rows, cols] = size(A)
+v = linspace(0, 1, 5)
+v(2) = 9; v
+sum(v)
+prod([1 2 3 4])
+sortrows([3 1; 1 2; 2 5])
+triu([1 2 3; 4 5 6; 7 8 9])
+kron([1 0; 0 1], [1 2; 3 4])
+polyfit([1 2 3], [2 4 6], 1)
+roots([1 -3 2])
+interp1([1 2 3], [10 20 30], 2.5)
+f = @(x) x.^2 - 2;
+fzero(f, 1)
+quad(f, 0, 1)
+strjoin({"a", "b", "c"}, "-")
+plot(v, v.^2)

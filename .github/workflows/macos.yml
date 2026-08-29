@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: macOS
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install meson ninja pkg-config gtk4 pango cairo glib ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-macos-${{ github.sha }}
+          restore-keys: ccache-macos-
+
+      - name: Configure
+        run: |
+          export CC="ccache clang"
+          ccache --max-size=200M
+          # No --werror: Apple clang warns about different things than the
+          # GCC the other two jobs use.
+          meson setup builddir
+
+      - name: Build
+        run: meson compile -C builddir
+
+      - name: Smoke test
+        run: |
+          printf 'x = {1, 2, 3}\nTotal[x^2] + sqrt(16)\n' \
+            | ./builddir/src/math42-calc | tee out.txt
+          grep -q 'Out\[2\]= 18' out.txt
+
+      - name: Upload binaries
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: math42-macos
+          path: |
+            builddir/src/math42
+            builddir/src/math42-calc
+          retention-days: 14

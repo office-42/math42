@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Math42
+GenericName=Mathematics notebook
+Comment=A computer algebra and numerics notebook in the shape of Mathematica and MATLAB
+Exec=math42 %F
+Icon=net.office42.math42
+Terminal=false
+Categories=Education;Science;Math;GTK;
+StartupNotify=true

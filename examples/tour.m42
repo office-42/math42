@@ -1,0 +1,12 @@
+(* A tour of math42: open this with File > Open, or run math42 examples/tour.m42 *)
+2^100
+Sum[i^2, {i, 1, n}]
+Sum[1/n^2, {n, 1, Infinity}]
+Solve[a x^2 + b x + c == 0, x]
+Integrate[Sqrt[1 - x^2], x]
+D[x^2 y^3, x, y]
+Limit[(1 + 1/n)^n, n -> Infinity]
+Eigensystem[[2, 1; 1, 2]]
+Sin[a + b] /. Sin[u_ + v_] -> Sin[u] Cos[v] + Cos[u] Sin[v]
+fib[0] = 0; fib[1] = 1; fib[n_] := fib[n - 1] + fib[n - 2]; fib[30]
+Plot3D[Sin[x] Cos[y], {x, -3, 3}, {y, -3, 3}]

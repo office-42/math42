@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Windows
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 / MinGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+          pacboy: >-
+            toolchain:p
+            pkgconf:p
+            meson:p
+            ninja:p
+            ccache:p
+            gtk4:p
+            pango:p
+            cairo:p
+            glib2:p
+
+      - name: Show toolchain
+        run: |
+          gcc --version | head -1
+          meson --version
+          pkg-config --modversion gtk4
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-windows-${{ github.sha }}
+          restore-keys: ccache-windows-
+
+      - name: Configure
+        run: |
+          export CCACHE_DIR="${GITHUB_WORKSPACE}/.ccache"
+          export CC="ccache gcc"
+          ccache --max-size=200M
+          meson setup builddir --werror
+
+      - name: Build
+        run: |
+          export CCACHE_DIR="${GITHUB_WORKSPACE}/.ccache"
+          meson compile -C builddir
+
+      - name: Smoke test
+        run: |
+          printf 'x = {1, 2, 3}\nTotal[x^2] + sqrt(16)\n' \
+            | ./builddir/src/math42-calc.exe | tee out.txt
+          grep -q 'Out\[2\]= 18' out.txt
+
+      - name: Upload binaries
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: math42-windows
+          path: |
+            builddir/src/math42.exe
+            builddir/src/math42-calc.exe
+          retention-days: 14
