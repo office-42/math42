@@ -232,10 +232,27 @@ matlab_read (const char *contents)
   g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
   g_autoptr (GString) plain = g_string_new (NULL);
 
+  gboolean in_block = FALSE;
+
   for (guint i = 0; lines[i] != NULL; i++)
     {
       g_autoptr (GString) one = g_string_new (NULL);
       char *line = g_strstrip (lines[i]);
+
+      /* %{ and %} on lines of their own fence off a block comment.
+       * Reading the lines between them as input meant that what
+       * somebody had commented out was run. */
+      if (!in_block && strcmp (line, "%{") == 0)
+        {
+          in_block = TRUE;
+          continue;
+        }
+      if (in_block)
+        {
+          if (strcmp (line, "%}") == 0)
+            in_block = FALSE;
+          continue;
+        }
 
       matlab_line_in (one, line);
       g_strchomp (one->str);
@@ -317,6 +334,13 @@ string_literal (const char **at)
     return g_string_free (text, TRUE);
   for (p++; *p != '\0' && *p != '"'; p++)
     {
+      /* \[Rule] is one character written by name, and the backslash
+       * belongs to the name rather than to the bracket after it. */
+      if (p[0] == '\\' && p[1] == '[')
+        {
+          g_string_append_c (text, *p);
+          continue;
+        }
       if (p[0] == '\\' && p[1] != '\0')
         {
           p++;
@@ -336,6 +360,64 @@ string_literal (const char **at)
  * a simple cell, and wrapped in RowBox and its kind for one that
  * Mathematica has laid out.  Taking the strings in order and putting
  * them end to end gives the input back either way. */
+/* The characters Mathematica writes by name.  \[Rule] is ->, and
+ * reading it as the letters it is spelt with turns
+ * PlotLabel \[Rule] "a line" into PlotLabel[Rule] "a line", which is
+ * an indexing and not an option -- wrong, and quietly so.  Only the
+ * ones math42 has a spelling for are translated; a name it does not
+ * know is left as it stands, where it will be complained about rather
+ * than misread.  A Greek letter is one of those: math42's names are
+ * written in the Latin alphabet, and turning \[Beta] into beta would
+ * hand somebody's variable to the Beta function. */
+static char *
+translate_named (const char *text)
+{
+  static const struct { const char *name, *means; } NAMED[] = {
+    { "Rule", " -> " },            { "RuleDelayed", " :> " },
+    { "Equal", " == " },           { "NotEqual", " != " },
+    { "LessEqual", " <= " },       { "GreaterEqual", " >= " },
+    { "Less", " < " },             { "Greater", " > " },
+    { "And", " && " },             { "Or", " || " },
+    { "Not", "!" },                { "Minus", "-" },
+    { "Times", " " },              { "Divide", "/" },
+    { "Infinity", "Infinity" },    { "Pi", "Pi" },
+    { "ExponentialE", "E" },       { "ImaginaryI", "I" },
+    { "Degree", " Degree" },       { "Transpose", "'" },
+    { "IndentingNewLine", " " },   { "AliasDelimiter", "" },
+    { "LeftAssociation", "{" },    { "RightAssociation", "}" },
+  };
+  GString *out = g_string_new (NULL);
+
+  for (const char *p = text; *p != '\0'; )
+    {
+      const char *close;
+      gboolean known = FALSE;
+
+      if (p[0] != '\\' || p[1] != '[' || (close = strchr (p + 2, ']')) == NULL)
+        {
+          g_string_append_c (out, *p++);
+          continue;
+        }
+      {
+        g_autofree char *name = g_strndup (p + 2, (gsize) (close - p - 2));
+
+        for (guint i = 0; i < G_N_ELEMENTS (NAMED); i++)
+          if (strcmp (name, NAMED[i].name) == 0)
+            {
+              g_string_append (out, NAMED[i].means);
+              known = TRUE;
+              break;
+            }
+        if (!known)
+          {
+            g_string_append_len (out, p, close - p + 1);
+          }
+      }
+      p = close + 1;
+    }
+  return g_string_free (out, FALSE);
+}
+
 /* --- the boxes a notebook is written in ---------------------------------
  *
  * Mathematica writes what was typed as boxes: RowBox for a run of
@@ -416,8 +498,9 @@ box_to_text (const char **at, GString *out)
   if (**at == '"')
     {
       g_autofree char *piece = string_literal (at);
+      g_autofree char *plain = translate_named (piece);
 
-      g_string_append (out, piece);
+      g_string_append (out, plain);
       return;
     }
 
