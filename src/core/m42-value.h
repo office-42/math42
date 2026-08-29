@@ -43,11 +43,15 @@ typedef struct {
   double        r, g, b;   /* its colour */
 } M42Series;
 
-/* A surface over a grid: z[i * ny + j] at the ith x and jth y. */
+/* A surface over a grid: z[i * ny + j] at the ith x and jth y.  Drawn
+ * in projection with its mesh, or -- when flat is set, which is what
+ * DensityPlot asks for -- looked down on, as a patch of colour for
+ * each cell. */
 typedef struct {
-  guint   nx, ny;
-  double *z;
-  double  xmin, xmax, ymin, ymax, zmin, zmax;
+  guint    nx, ny;
+  double  *z;
+  double   xmin, xmax, ymin, ymax, zmin, zmax;
+  gboolean flat;
 } M42Surface;
 
 /* One contour: the level it stands for, and the segments that draw it. */

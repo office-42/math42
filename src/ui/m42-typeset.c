@@ -880,6 +880,39 @@ draw_surface (const M42Plot *p, cairo_t *cr, double x0, double y0, double w, dou
   double scale, cx, cy;
   double minx = 1e30, maxx = -1e30, miny = 1e30, maxy = -1e30;
 
+  /* Looked straight down on: a patch of colour for each cell, with the
+   * same colours the projection uses for height.  There is no mesh and
+   * no shading, because there is nothing to shade -- the picture is
+   * the colour. */
+  if (s->flat)
+    {
+      double cw = w / (double) (nx - 1), ch = h / (double) (ny - 1);
+
+      for (guint i = 0; i + 1 < nx; i++)
+        for (guint j = 0; j + 1 < ny; j++)
+          {
+            double z00 = s->z[i * ny + j], z10 = s->z[(i + 1) * ny + j];
+            double z01 = s->z[i * ny + j + 1], z11 = s->z[(i + 1) * ny + j + 1];
+            double middle = (z00 + z10 + z01 + z11) / 4;
+            double r, g, b, t;
+
+            if (!isfinite (middle))
+              continue;
+            t = s->zmax > s->zmin ? (middle - s->zmin) / (s->zmax - s->zmin) : 0.5;
+            height_colour (CLAMP (t, 0, 1), &r, &g, &b);
+            cairo_set_source_rgb (cr, r, g, b);
+            /* Up the page is the larger y, as it is on every other
+             * graph math42 draws. */
+            cairo_rectangle (cr, x0 + i * cw, y0 + h - (j + 1) * ch, cw + 0.5, ch + 0.5);
+            cairo_fill (cr);
+          }
+      cairo_set_source_rgb (cr, 0.55, 0.55, 0.58);
+      cairo_set_line_width (cr, 1);
+      cairo_rectangle (cr, x0, y0, w, h);
+      cairo_stroke (cr);
+      return;
+    }
+
   /* Where the corners of the box land, so that the picture can be
    * scaled to fit whatever room it has. */
   for (int i = 0; i < 8; i++)
@@ -1131,8 +1164,10 @@ draw_plot (const M42Box *b, cairo_t *cr, double x0, double y0)
   cairo_rectangle (cr, L, T, w, h);
   cairo_fill (cr);
 
-  /* A graph of two variables is a different picture altogether. */
-  if (p->surface != NULL)
+  /* A graph of two variables is a different picture altogether --
+   * unless it is looked straight down on, which wants the axes and the
+   * frame every flat graph has, with the colour painted inside them. */
+  if (p->surface != NULL && !p->surface->flat)
     {
       draw_surface (p, cr, 8, T + 2, PLOT_W - 16, h - 6);
       if (p->title != NULL)
@@ -1152,6 +1187,10 @@ draw_plot (const M42Box *b, cairo_t *cr, double x0, double y0)
       cairo_restore (cr);
       return;
     }
+
+  /* Looked down on: the colour goes in first, and the axes over it. */
+  if (p->surface != NULL && p->surface->flat)
+    draw_surface (p, cr, L, T, w, h);
 
   label = pango_cairo_create_layout (cr);
   pango_layout_set_font_description (label, desc);

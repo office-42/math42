@@ -481,6 +481,9 @@ static M42Value *index_value (M42Value *v, GPtrArray *indices, guint from);
 static M42Value *lookup (M42Session *s, const char *name);
 static M42Value *interpolation_function (M42Session *s, const M42Value *data);
 static M42Value *import_file (const char *path, const char *what);
+static void add_contours (M42Plot *p, const double *z, guint n, double x0, double x1,
+                          double y0, double y1, double lowest, double highest,
+                          guint levels);
 static M42Value *export_file (const char *path, const M42Value *v, const char *what);
 static M42Value *closed_form_sum (M42Session *s, const M42Node *call, const char *upper_name);
 static gboolean value_matches (M42Session *s, const M42Value *v, const M42Value *pattern);
@@ -5554,7 +5557,7 @@ surface_at (M42Session *s, const M42Node *f, const char *xvar, double x,
 /* Plot3D[f, {x, a, b}, {y, c, d}]: the surface over a grid, which the
  * notebook draws in projection.  MATLAB's surf and mesh land here too. */
 static M42Value *
-plot3d (M42Session *s, const M42Node *call)
+plot3d (M42Session *s, const M42Node *call, gboolean flat)
 {
   const M42Node *xs, *ys;
   const char *xvar, *yvar;
@@ -5603,6 +5606,7 @@ plot3d (M42Session *s, const M42Node *call)
         double y = y0 + (y1 - y0) * j / (double) (n - 1);
         surface->z[i * n + j] = surface_at (s, m42_node_child (call, 0), xvar, x, yvar, y);
       }
+  surface->flat = flat;
   m42_surface_autoscale (surface);
   p->xmin = x0;
   p->xmax = x1;
@@ -5617,6 +5621,139 @@ plot3d (M42Session *s, const M42Node *call)
       }
   }
   return out;
+}
+
+/* ListPlot3D, ListContourPlot and ListDensityPlot: the same three
+ * pictures, but handed the grid of heights instead of a function to
+ * work one out from.  The places run 1, 2, 3 across and down, as they
+ * do in both languages. */
+static M42Value *
+list_grid_plot (const M42Value *data, const char *name, gboolean as_contours,
+                gboolean flat)
+{
+  guint rows, cols;
+  g_autofree double *z = NULL;
+  double lowest = INFINITY, highest = -INFINITY;
+  M42Value *out;
+  M42Plot *p;
+
+  if (!m42_value_is_matrix (data, &rows, &cols) || rows < 2 || cols < 2)
+    return m42_value_error ("%s wants a grid of heights, two or more each way", name);
+
+  /* z is held the way a surface holds it: the first index across. */
+  z = g_new (double, rows * cols);
+  for (guint i = 0; i < cols; i++)
+    for (guint j = 0; j < rows; j++)
+      {
+        double v;
+
+        if (!value_number (m42_value_list_nth (m42_value_list_nth (data, j), i), &v))
+          return m42_value_error ("%s wants numbers", name);
+        z[i * rows + j] = v;
+        lowest = MIN (lowest, v);
+        highest = MAX (highest, v);
+      }
+  if (!(highest > lowest))
+    return m42_value_error ("%s: every height is the same", name);
+
+  out = m42_value_plot_new ();
+  p = out->u.plot;
+  p->xmin = 1;
+  p->xmax = cols;
+  p->ymin = 1;
+  p->ymax = rows;
+
+  if (as_contours)
+    {
+      /* The marching squares want a square grid; a rectangle is walked
+       * the same way with the two counts kept apart, so the grid is
+       * squared off by using the smaller count. */
+      guint n = MIN (rows, cols);
+      g_autofree double *square = g_new (double, n * n);
+
+      for (guint i = 0; i < n; i++)
+        for (guint j = 0; j < n; j++)
+          square[i * n + j] = z[i * rows + j];
+      add_contours (p, square, n, 1, n, 1, n, lowest, highest, 9);
+      p->xmax = n;
+      p->ymax = n;
+      return out;
+    }
+
+  {
+    M42Surface *surface = m42_plot_add_surface (p, cols, rows);
+
+    memcpy (surface->z, z, sizeof (double) * rows * cols);
+    surface->xmin = 1;
+    surface->xmax = cols;
+    surface->ymin = 1;
+    surface->ymax = rows;
+    surface->flat = flat;
+    m42_surface_autoscale (surface);
+  }
+  return out;
+}
+
+/* The curves along which a grid of values keeps the same height, found
+ * by walking it square by square and joining where the level crosses
+ * each edge -- the method that goes by the name of marching squares.
+ * ContourPlot works a function out over the grid first; ListContourPlot
+ * is handed the grid. */
+static void
+add_contours (M42Plot *p, const double *z, guint n, double x0, double x1,
+              double y0, double y1, double lowest, double highest, guint levels)
+{
+  for (guint k = 0; k < levels; k++)
+    {
+      double level = lowest + (highest - lowest) * (k + 1) / (levels + 1);
+      M42Contour *contour = m42_plot_add_contour (p, level, k, levels);
+
+      for (guint i = 0; i + 1 < n; i++)
+        for (guint j = 0; j + 1 < n; j++)
+          {
+            /* The four corners of one square, and where the level
+             * crosses its edges. */
+            double corner[4] = { z[i * n + j], z[(i + 1) * n + j],
+                                 z[(i + 1) * n + j + 1], z[i * n + j + 1] };
+            double cx[4], cy[4];
+            double left = x0 + (x1 - x0) * i / (double) (n - 1);
+            double right = x0 + (x1 - x0) * (i + 1) / (double) (n - 1);
+            double bottom = y0 + (y1 - y0) * j / (double) (n - 1);
+            double top = y0 + (y1 - y0) * (j + 1) / (double) (n - 1);
+            double px[2], py[2];
+            guint found = 0;
+            gboolean whole = TRUE;
+
+            for (int c = 0; c < 4; c++)
+              if (!isfinite (corner[c]))
+                whole = FALSE;
+            if (!whole)
+              continue;
+
+            cx[0] = left;   cy[0] = bottom;
+            cx[1] = right;  cy[1] = bottom;
+            cx[2] = right;  cy[2] = top;
+            cx[3] = left;   cy[3] = top;
+
+            for (int e = 0; e < 4 && found < 2; e++)
+              {
+                int a = e, b = (e + 1) % 4;
+                double va = corner[a], vb = corner[b];
+
+                if ((va < level) == (vb < level))
+                  continue;
+                {
+                  double t = (level - va) / (vb - va);
+
+                  px[found] = cx[a] + (cx[b] - cx[a]) * t;
+                  py[found] = cy[a] + (cy[b] - cy[a]) * t;
+                  found++;
+                }
+              }
+            if (found == 2)
+              m42_contour_add_segment (contour, px[0], py[0], px[1], py[1]);
+          }
+    }
 }
 
 /* ContourPlot[f, {x, a, b}, {y, c, d}]: the curves along which f keeps
@@ -5685,57 +5822,7 @@ contour_plot (M42Session *s, const M42Node *call)
   p->xlabel = g_strdup (xvar);
   p->ylabel = g_strdup (yvar);
 
-  for (guint k = 0; k < levels; k++)
-    {
-      double level = lowest + (highest - lowest) * (k + 1) / (levels + 1);
-      M42Contour *contour = m42_plot_add_contour (p, level, k, levels);
-
-      for (guint i = 0; i + 1 < n; i++)
-        for (guint j = 0; j + 1 < n; j++)
-          {
-            /* The four corners of one square, and where the level
-             * crosses its edges. */
-            double corner[4] = { z[i * n + j], z[(i + 1) * n + j],
-                                 z[(i + 1) * n + j + 1], z[i * n + j + 1] };
-            double cx[4], cy[4];
-            double left = x0 + (x1 - x0) * i / (double) (n - 1);
-            double right = x0 + (x1 - x0) * (i + 1) / (double) (n - 1);
-            double bottom = y0 + (y1 - y0) * j / (double) (n - 1);
-            double top = y0 + (y1 - y0) * (j + 1) / (double) (n - 1);
-            double px[2], py[2];
-            guint found = 0;
-            gboolean whole = TRUE;
-
-            for (int c = 0; c < 4; c++)
-              if (!isfinite (corner[c]))
-                whole = FALSE;
-            if (!whole)
-              continue;
-
-            cx[0] = left;   cy[0] = bottom;
-            cx[1] = right;  cy[1] = bottom;
-            cx[2] = right;  cy[2] = top;
-            cx[3] = left;   cy[3] = top;
-
-            for (int e = 0; e < 4 && found < 2; e++)
-              {
-                int a = e, b = (e + 1) % 4;
-                double va = corner[a], vb = corner[b];
-
-                if ((va < level) == (vb < level))
-                  continue;
-                {
-                  double t = (level - va) / (vb - va);
-
-                  px[found] = cx[a] + (cx[b] - cx[a]) * t;
-                  py[found] = cy[a] + (cy[b] - cy[a]) * t;
-                  found++;
-                }
-              }
-            if (found == 2)
-              m42_contour_add_segment (contour, px[0], py[0], px[1], py[1]);
-          }
-    }
+  add_contours (p, z, n, x0, x1, y0, y1, lowest, highest, levels);
 
   {
     M42Value *bad = plot_options (s, call, 3, p);
@@ -11164,8 +11251,21 @@ eval_call (M42Session *s, const M42Node *n)
   if (name_is (name, "LogLogPlot", "loglog")) return plot (s, n, TRUE, TRUE);
   if (name_is (name, "ContourPlot", "contour")) return contour_plot (s, n);
   if (name_is (name, "ParametricPlot", NULL)) return parametric_plot (s, n, FALSE);
-  if (name_is (name, "Plot3D", "surf") || name_is (name, "mesh", NULL))
-    return plot3d (s, n);
+  if (name_is (name, "ListPlot3D", NULL) || name_is (name, "ListContourPlot", NULL) ||
+      name_is (name, "ListDensityPlot", NULL))
+    {
+      g_autoptr (M42Value) data = n->children->len >= 1 ? eval (s, m42_node_child (n, 0))
+                                                        : m42_value_null ();
+
+      if (is_error (data))
+        return m42_value_ref (data);
+      return list_grid_plot (data, name, name_is (name, "ListContourPlot", NULL),
+                             name_is (name, "ListDensityPlot", NULL));
+    }
+
+  if (name_is (name, "Plot3D", "surf") || name_is (name, "mesh", NULL) ||
+      name_is (name, "DensityPlot", NULL))
+    return plot3d (s, n, name_is (name, "DensityPlot", NULL));
   if (name_is (name, "PolarPlot", "polarplot")) return parametric_plot (s, n, TRUE);
   if (name_is (name, "FindMinimum", "fminsearch") || name_is (name, "FindMaximum", NULL) ||
       name_is (name, "fminbnd", NULL) || name_is (name, "ArgMin", "argmin"))
