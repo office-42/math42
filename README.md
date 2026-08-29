@@ -10,6 +10,10 @@ in C on GTK 4, Pango and Cairo. A sibling of
 
 ![Math42](docs/images/screenshot.png)
 
+*The picture is [`examples/showcase.m42`](examples/showcase.m42), which
+is a file you can open: every notebook is a plain text file of its
+inputs, and running it again gives the page back.*
+
 The window is a notebook: type an expression on the input line, press
 Enter, and an `In[n]:=` / `Out[n]=` pair is added to the page. Results
 are set as mathematics — an integral under its sign with its limits, a
@@ -250,11 +254,14 @@ math42-calc examples/matlab-script.m     # or just run a MATLAB script
 
 ## Examples
 
-Three notebooks to open with File > Open, or to run from a terminal as
-`math42 examples/tour.m42`:
+Four notebooks to open with File > Open, or to run from a terminal as
+`math42 examples/showcase.m42`:
 
-- `examples/tour.m42` — a page of what math42 does, which is what the
-  picture above shows.
+- `examples/showcase.m42` — the page in the picture above: exact
+  arithmetic, MATLAB's brackets, a pattern, three graphs, and an
+  integral, a differential equation, the quadratic formula and a
+  series set as mathematics.
+- `examples/tour.m42` — a page of what math42 does, one line each.
 - `examples/calculus.m42` — derivatives, integrals, limits, series,
   sums, a differential equation, a Laplace transform and a Fourier
   series.

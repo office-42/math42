@@ -695,9 +695,14 @@ box_from_value (GtkWidget *w, const M42Value *v, double size)
     case M42_VALUE_PLOT:
       {
         M42Box *b = box_new (BOX_PLOT, size);
+        /* A surface seen in projection is wider than it is tall and
+         * is drawn to fit whatever room it has, so a box of the usual
+         * height left a band of white under it. */
+        gboolean in_projection = v->u.plot->surface != NULL && !v->u.plot->surface->flat;
+
         b->plot = v->u.plot;
         b->width = PLOT_W;
-        b->ascent = PLOT_H;
+        b->ascent = in_projection ? (int) (PLOT_H * 0.82) : PLOT_H;
         b->descent = 0;
         return b;
       }

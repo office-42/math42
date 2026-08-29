@@ -155,11 +155,12 @@ A line that is only a comment becomes a line of text on the page, with
 no `In[n]` beside it and nothing worked out — which is how the comments
 in a script survive being read.
 
-### Three notebooks to start from
+### Four notebooks to start from
 
-`examples/tour.m42`, `examples/calculus.m42` and `examples/matlab.m42`
-come with math42. Open one with File ▸ Open, or run
-`math42 examples/tour.m42` from a terminal. A line beginning `(*` is a
+`examples/showcase.m42`, `examples/tour.m42`, `examples/calculus.m42`
+and `examples/matlab.m42` come with math42. Open one with File ▸ Open,
+or run `math42 examples/showcase.m42` from a terminal. The first is
+the page in the picture at the top of the README. A line beginning `(*` is a
 comment and is passed over — and since a notebook reads a line at a
 time, a comment has to fit on one.
 

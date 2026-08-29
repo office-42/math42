@@ -1,0 +1,22 @@
+(* Math42 - a mathematics notebook that speaks both languages. *)
+(* Open with File > Open, or run: math42 examples/showcase.m42 *)
+(* Exact wherever mathematics is exact. *)
+2^100
+Sum[1/n^2, {n, 1, Infinity}]
+Limit[(1 + 1/n)^n, n -> Infinity]
+(* MATLAB's spelling, and MATLAB's brackets. *)
+A = [4 -2; 1 1]
+eig(A)
+inv(A) . A
+(* A pattern is a rule that rewrites whatever it matches. *)
+Sin[a + b] /. Sin[u_ + v_] -> Sin[u] Cos[v] + Cos[u] Sin[v]
+(* Graphs are drawn, not printed. *)
+Plot[{Sin[x], Sin[x]^3}, {x, 0, 2 Pi}, PlotLabel -> "a sine and its cube"]
+StreamPlot[{-y, x}, {x, -2, 2}, {y, -2, 2}, PlotLabel -> "a turning field"]
+Plot3D[Sin[x] Cos[y], {x, -3, 3}, {y, -3, 3}]
+(* And the answers come out as mathematics. *)
+Integrate[Sqrt[1 - x^2], x]
+DSolve[y'' + 4 y == Sin[x], y, x]
+Solve[a x^2 + b x + c == 0, x]
+Series[Exp[x], {x, 0, 6}]
+Factor[x^3 - 6x^2 + 11x - 6]
