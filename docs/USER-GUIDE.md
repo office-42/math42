@@ -721,6 +721,9 @@ In[n]:= fft({1, 2, 3, 4})                     Out[n]= {10, -2 + 2 I, -2, -2 - 2 
 | `Eigenvalues`, `Eigenvectors`, `Eigensystem` | Jacobi for a symmetric matrix, QR otherwise. The vectors are what each eigenvalue sends to nothing, for any matrix whose eigenvalues are real; where there are fewer vectors than values, the gap is filled with a vector of nothing, as Mathematica fills it |
 | `MatrixPower`, `Rank`/`MatrixRank`, `Tr`, `Norm`, `Cross` | |
 | `Diagonal[m]`, `Diagonal[m, k]` | the diagonal, and the one k steps off it |
+| `CholeskyDecomposition[m]`, `chol` | the upper R with `R'.R` the matrix, for a positive definite one |
+| `sqrtm(m)` | the matrix whose square it is, by Denman and Beavers |
+| `squeeze`, `vertcat`, `horzcat`, `cat(dim, a, b)` | MATLAB's ways of stacking and unstacking |
 | `IdentityMatrix`/`eye`, `zeros`, `ones` | |
 | `DiagonalMatrix`/`diag`, `ArrayReshape`/`reshape` | |
 | `Dimensions`/`size`, `size(A, 1)` | |
@@ -751,7 +754,7 @@ is `{I, -I}`.
 `StandardDeviation`, `Max`, `Min`, `Sort`, `Reverse`, `Flatten`,
 `Join`, `First`, `Last`, `Rest`, `Append`, `Take`, `Drop`,
 `Partition`, `Count`, `Position`/`find`, `Tally`, `Counts`, `Ratios`,
-`Thread`, `Union`,
+`Thread`, `Inner[f, u, v, g]`, `Union`,
 `Intersection`, `Complement`, `Accumulate`/`cumsum`,
 `Differences`/`diff`, `AnyTrue`/`any`, `AllTrue`/`all`, `repmat`,
 `fliplr`, `flipud`, `cumprod`, `logspace`, `RandomChoice`,
@@ -800,7 +803,8 @@ and `polyder` and `polyint` for a polynomial kept as coefficients.
 `Map`/`arrayfun`, `Select`, `Fold`, `FoldList`, `Nest`, `NestList`,
 `NestWhile`, `NestWhileList`, `FixedPoint`, `FixedPointList`, `Apply`,
 `Through`, `Gather`, `GatherBy`, `SplitBy` and `GroupBy` — each of
-which takes either a pure function or the name of one:
+which takes either a pure function or the name of one, and `cellfun`
+is MATLAB's other spelling of `Map`:
 
 ```
 In[31]:= Select[Range[10], PrimeQ]      Out[31]= {2, 3, 5, 7}
@@ -906,10 +910,18 @@ with one rule or a list of them, or MATLAB's
 `strrep(s, "a", "b")` — and `IntegerString[255, 16]` and
 `FromDigits["ff", 16]` change base either way.
 
+`StringMatchQ[s, "a*"]` asks whether the whole of the text matches a
+pattern, with `*` for anything and `?` for one letter, and
+`StringCases[s, p]` gives every piece of it that does. Where a real
+regular expression is wanted there is MATLAB's
+`regexprep(s, pattern, to)`.
+
 ```
 In[s1]:= StringReplace["hello", "l" -> "L"]        Out[s1]= "heLLo"
 In[s2]:= StringRiffle[{"a", "b", "c"}, "-"]        Out[s2]= "a-b-c"
 In[s3]:= StringCount["banana", "an"]               Out[s3]= 2
+In[s4a]:= StringCases["banana", "an"]              Out[s4a]= {"an", "an"}
+In[s4b]:= regexprep("2026-08-29", "-", "/")        Out[s4b]= "2026/08/29"
 In[s4]:= IntegerString[255, 16]                    Out[s4]= "ff"
 ```
 

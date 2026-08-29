@@ -569,6 +569,34 @@ exact_fraction (gint64 p, gint64 q)
   return m42_value_rational (p / g, q / g);
 }
 
+/* Numbers too small to mean anything written as nothing, all through
+ * a list and the lists inside it.  A matrix of residuals is what one
+ * usually wants to Chop, and it used to answer with the call left
+ * standing. */
+static M42Value *
+chop_value (const M42Value *v)
+{
+  if (v->kind == M42_VALUE_LIST)
+    {
+      M42Value *out = m42_value_list_new ();
+
+      for (guint i = 0; i < m42_value_list_length (v); i++)
+        m42_value_list_append (out, chop_value (m42_value_list_nth (v, i)));
+      return out;
+    }
+  if (v->kind == M42_VALUE_NUMBER)
+    return m42_value_number (fabs (v->u.number) < 1e-10 ? 0 : v->u.number);
+  if (v->kind == M42_VALUE_COMPLEX)
+    {
+      double _Complex z = as_complex (v);
+      double re = creal (z), im = cimag (z);
+
+      return from_complex ((fabs (re) < 1e-10 ? 0 : re) +
+                           (fabs (im) < 1e-10 ? 0 : im) * I);
+    }
+  return m42_value_ref ((M42Value *) v);
+}
+
 /* Two names in a pointer array, which holds each of them one step
  * further away than a plain sort would look. */
 static gint
@@ -8668,6 +8696,90 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
         return m42_value_error ("%s expects a whole exponent", name);
       return m42_value_matrix_power (ARG (0), (int) k);
     }
+  /* A positive definite matrix as L L', with L lower triangular --
+   * the decomposition every least squares and every simulation of
+   * correlated numbers begins with.  MATLAB's chol gives the upper
+   * one, R'R, and Mathematica's gives the same R. */
+  if ((name_is (name, "CholeskyDecomposition", "chol")) && args->len == 1)
+    {
+      g_autoptr (M42Matrix) m = m42_matrix_from_value (ARG (0), FALSE);
+      g_autoptr (M42Matrix) r = NULL;
+
+      if (m == NULL || m->rows != m->cols)
+        return m42_value_error ("%s expects a square matrix", name);
+      r = m42_matrix_new (m->rows, m->cols);
+      for (guint i = 0; i < m->rows; i++)
+        for (guint j = i; j < m->cols; j++)
+          {
+            double sum = *m42_matrix_at (m, i, j);
+
+            for (guint k = 0; k < i; k++)
+              sum -= *m42_matrix_at (r, k, i) * *m42_matrix_at (r, k, j);
+            if (i == j)
+              {
+                if (sum <= 0)
+                  return m42_value_error ("%s: the matrix is not positive definite", name);
+                *m42_matrix_at (r, i, j) = sqrt (sum);
+              }
+            else
+              *m42_matrix_at (r, i, j) = sum / *m42_matrix_at (r, i, i);
+          }
+      return m42_matrix_to_value (r, FALSE);
+    }
+
+  /* The square root of a matrix, by Denman and Beavers: Y and Z walk
+   * towards the root and its inverse together. */
+  if ((name_is (name, "MatrixSqrt", "sqrtm")) && args->len == 1)
+    {
+      g_autoptr (M42Matrix) a = m42_matrix_from_value (ARG (0), FALSE);
+      g_autoptr (M42Matrix) y = NULL;
+      g_autoptr (M42Matrix) z = NULL;
+      guint n;
+
+      if (a == NULL || a->rows != a->cols)
+        return m42_value_error ("%s expects a square matrix", name);
+      n = a->rows;
+      y = m42_matrix_new (n, n);
+      z = m42_matrix_new (n, n);
+      for (guint i = 0; i < n; i++)
+        for (guint j = 0; j < n; j++)
+          {
+            *m42_matrix_at (y, i, j) = *m42_matrix_at (a, i, j);
+            *m42_matrix_at (z, i, j) = i == j ? 1 : 0;
+          }
+      for (int round = 0; round < 60; round++)
+        {
+          g_autoptr (M42Matrix) yi = m42_matrix_inverse (y);
+          g_autoptr (M42Matrix) zi = m42_matrix_inverse (z);
+          double moved = 0;
+
+          if (yi == NULL || zi == NULL)
+            return m42_value_error ("%s: no square root was found", name);
+          for (guint i = 0; i < n; i++)
+            for (guint j = 0; j < n; j++)
+              {
+                double ny = (*m42_matrix_at (y, i, j) + *m42_matrix_at (zi, i, j)) / 2;
+                double nz = (*m42_matrix_at (z, i, j) + *m42_matrix_at (yi, i, j)) / 2;
+
+                moved += fabs (ny - *m42_matrix_at (y, i, j));
+                *m42_matrix_at (y, i, j) = ny;
+                *m42_matrix_at (z, i, j) = nz;
+              }
+          if (moved < 1e-14 * n * n)
+            break;
+        }
+      /* Whole numbers that came out a hair off are put back. */
+      for (guint i = 0; i < n; i++)
+        for (guint j = 0; j < n; j++)
+          {
+            double *at = m42_matrix_at (y, i, j);
+
+            if (fabs (*at - round (*at)) < 1e-9)
+              *at = round (*at);
+          }
+      return m42_matrix_to_value (y, FALSE);
+    }
+
   if ((name_is (name, "Rank", "rank") || name_is (name, "MatrixRank", NULL)) &&
       args->len == 1)
     {
@@ -9208,7 +9320,8 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
         }
       return out;
     }
-  if (name_is (name, "Map", "arrayfun") && args->len == 2)
+  if ((name_is (name, "Map", "arrayfun") || name_is (name, "Map", "cellfun")) &&
+      args->len == 2)
     {
       M42Value *f = ARG (0), *list = ARG (1), *out;
       if (list->kind != M42_VALUE_LIST)
@@ -11165,6 +11278,133 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       return out;
     }
 
+  /* The dot product with two functions of one's own choosing:
+   * Inner[Times, u, v, Plus] is the ordinary one. */
+  if (name_is (name, "Inner", NULL) && args->len == 4 &&
+      m42_value_is_vector (ARG (1)) && m42_value_is_vector (ARG (2)))
+    {
+      guint n = m42_value_list_length (ARG (1));
+      g_autoptr (M42Value) running = NULL;
+
+      if (m42_value_list_length (ARG (2)) != n)
+        return m42_value_error ("Inner: the two lists are of different lengths");
+      for (guint i = 0; i < n; i++)
+        {
+          g_autoptr (GPtrArray) two =
+            g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
+          M42Value *term;
+
+          g_ptr_array_add (two, m42_value_ref (m42_value_list_nth (ARG (1), i)));
+          g_ptr_array_add (two, m42_value_ref (m42_value_list_nth (ARG (2), i)));
+          term = apply_callable (s, ARG (0), two);
+          if (is_error (term))
+            return term;
+          if (running == NULL)
+            running = term;
+          else
+            {
+              g_autoptr (GPtrArray) pair =
+                g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
+              M42Value *joined;
+
+              g_ptr_array_add (pair, g_steal_pointer (&running));
+              g_ptr_array_add (pair, term);
+              joined = apply_callable (s, ARG (3), pair);
+              if (is_error (joined))
+                return joined;
+              running = joined;
+            }
+        }
+      return running != NULL ? g_steal_pointer (&running) : m42_value_number (0);
+    }
+
+  /* A list of one row is that row: what MATLAB's squeeze does to the
+   * dimensions of length one. */
+  if (name_is (name, "squeeze", NULL) && args->len == 1)
+    {
+      const M42Value *v = ARG (0);
+
+      while (v->kind == M42_VALUE_LIST && m42_value_list_length (v) == 1 &&
+             m42_value_list_nth (v, 0)->kind == M42_VALUE_LIST)
+        v = m42_value_list_nth (v, 0);
+      return m42_value_ref ((M42Value *) v);
+    }
+
+  /* Lists put end to end, or one under the other. */
+  if ((name_is (name, "vertcat", NULL) || name_is (name, "horzcat", NULL) ||
+       name_is (name, "cat", NULL)) && args->len >= 1)
+    {
+      gboolean rows = name_is (name, "vertcat", NULL);
+      guint from = 0;
+      M42Value *out;
+
+      if (name_is (name, "cat", NULL))
+        {
+          double which = 1;
+
+          if (!is_num (ARG (0)))
+            return m42_value_error ("cat wants a dimension first");
+          which = ARG (0)->u.number;
+          rows = which == 1;
+          from = 1;
+        }
+      out = m42_value_list_new ();
+      for (guint i = from; i < args->len; i++)
+        {
+          const M42Value *piece = ARG (i);
+
+          if (rows || piece->kind != M42_VALUE_LIST)
+            m42_value_list_append (out, m42_value_ref ((M42Value *) piece));
+          else
+            for (guint k = 0; k < m42_value_list_length (piece); k++)
+              m42_value_list_append (out, m42_value_ref (m42_value_list_nth (piece, k)));
+        }
+      return out;
+    }
+
+  /* How many of the numbers fall into each of n equal buckets. */
+  if (name_is (name, "histcounts", NULL) && args->len >= 1 &&
+      m42_value_is_vector (ARG (0)))
+    {
+      guint n = m42_value_list_length (ARG (0));
+      double how_many = 10, lowest = 0, highest = 0;
+      guint buckets;
+      g_autofree guint *counts = NULL;
+      M42Value *out;
+
+      if (n == 0)
+        return m42_value_list_new ();
+      if (args->len == 2 && is_num (ARG (1)))
+        how_many = ARG (1)->u.number;
+      if (how_many < 1 || how_many > 10000)
+        return m42_value_error ("histcounts: between one and ten thousand buckets");
+      buckets = (guint) how_many;
+      for (guint i = 0; i < n; i++)
+        {
+          double x = as_double (m42_value_list_nth (ARG (0), i));
+
+          if (i == 0 || x < lowest)
+            lowest = x;
+          if (i == 0 || x > highest)
+            highest = x;
+        }
+      counts = g_new0 (guint, buckets);
+      for (guint i = 0; i < n; i++)
+        {
+          double x = as_double (m42_value_list_nth (ARG (0), i));
+          double at = highest > lowest ? (x - lowest) / (highest - lowest) : 0;
+          guint which = (guint) (at * buckets);
+
+          if (which >= buckets)
+            which = buckets - 1;
+          counts[which]++;
+        }
+      out = m42_value_list_new ();
+      for (guint i = 0; i < buckets; i++)
+        m42_value_list_append (out, m42_value_number (counts[i]));
+      return out;
+    }
+
   /* The diagonal of a matrix, and the ones above and below it. */
   if (name_is (name, "Diagonal", NULL) && args->len >= 1 &&
       ARG (0)->kind == M42_VALUE_LIST)
@@ -11363,6 +11603,13 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
     return m42_value_number (floor (ARG (0)->u.number / ARG (1)->u.number));
   if (name_is (name, "UnitStep", "heaviside") && args->len == 1 && is_num (ARG (0)))
     return m42_value_number (ARG (0)->u.number >= 0);
+  /* Heaviside's step, which Mathematica leaves standing at nothing
+   * because the value there is a matter of convention. */
+  if (name_is (name, "HeavisideTheta", NULL) && args->len == 1 && is_num (ARG (0)) &&
+      ARG (0)->u.number != 0)
+    return m42_value_number (ARG (0)->u.number > 0);
+  if (name_is (name, "Ramp", NULL) && args->len == 1 && is_num (ARG (0)))
+    return m42_value_number (MAX (ARG (0)->u.number, 0));
   if (name_is (name, "Boole", NULL) && args->len == 1 && is_num (ARG (0)))
     return m42_value_number (ARG (0)->u.number != 0);
   if (name_is (name, "Clip", NULL) && args->len == 2 && is_num (ARG (0)) &&
@@ -11509,8 +11756,8 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
             }
           return m42_value_number (depth);
         }
-      if (name_is (name, "Chop", NULL) && is_num (v))
-        return m42_value_number (fabs (v->u.number) < 1e-10 ? 0 : v->u.number);
+      if (name_is (name, "Chop", NULL))
+        return chop_value (v);
     }
 
   if (name_is (name, "SameQ", "isequal") && args->len == 2)
@@ -12099,6 +12346,72 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
 
   /* StringReplace[s, from, to] the MATLAB way, and Mathematica's
    * StringReplace[s, from -> to], with a list of rules if you like. */
+  /* A pattern of the kind a shell uses -- * for anything, ? for one
+   * letter -- which is what StringMatchQ means by a pattern and what
+   * MATLAB's wildcards are too. */
+  if (name_is (name, "StringMatchQ", NULL) && args->len == 2 &&
+      ARG (0)->kind == M42_VALUE_STRING && ARG (1)->kind == M42_VALUE_STRING)
+    return m42_value_number (g_pattern_match_simple (ARG (1)->u.string,
+                                                     ARG (0)->u.string));
+
+  /* Every piece of the text that the pattern stands for. */
+  if (name_is (name, "StringCases", NULL) && args->len == 2 &&
+      ARG (0)->kind == M42_VALUE_STRING && ARG (1)->kind == M42_VALUE_STRING)
+    {
+      const char *text = ARG (0)->u.string, *want = ARG (1)->u.string;
+      M42Value *out = m42_value_list_new ();
+
+      if (want[0] == 0)
+        return out;
+      if (strchr (want, '*') != NULL || strchr (want, '?') != NULL)
+        {
+          /* A pattern: every run of letters that matches it, longest
+           * first from each place. */
+          gsize len = strlen (text);
+
+          for (gsize i = 0; i < len; i++)
+            for (gsize j = len; j > i; j--)
+              {
+                g_autofree char *piece = g_strndup (text + i, j - i);
+
+                if (g_pattern_match_simple (want, piece))
+                  {
+                    m42_value_list_append (out, m42_value_string (piece));
+                    i = j - 1;
+                    break;
+                  }
+              }
+          return out;
+        }
+      for (const char *at = text; (at = strstr (at, want)) != NULL; at += strlen (want))
+        m42_value_list_append (out, m42_value_string (want));
+      return out;
+    }
+
+  /* MATLAB's regexprep, which is a regular expression and not a
+   * pattern: the one place math42 uses one. */
+  if (name_is (name, "regexprep", NULL) && args->len == 3 &&
+      ARG (0)->kind == M42_VALUE_STRING && ARG (1)->kind == M42_VALUE_STRING &&
+      ARG (2)->kind == M42_VALUE_STRING)
+    {
+      g_autoptr (GError) trouble = NULL;
+      g_autoptr (GRegex) rule = g_regex_new (ARG (1)->u.string, 0, 0, &trouble);
+      char *done;
+
+      if (rule == NULL)
+        return m42_value_error ("regexprep: %s", trouble->message);
+      done = g_regex_replace (rule, ARG (0)->u.string, -1, 0, ARG (2)->u.string,
+                              0, &trouble);
+      if (done == NULL)
+        return m42_value_error ("regexprep: %s", trouble->message);
+      {
+        M42Value *out = m42_value_string (done);
+
+        g_free (done);
+        return out;
+      }
+    }
+
   if (name_is (name, "StringReplace", "strrep") && args->len >= 2 &&
       ARG (0)->kind == M42_VALUE_STRING)
     {
