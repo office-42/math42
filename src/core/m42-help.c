@@ -20,7 +20,7 @@ static const M42Function FUNCTIONS[] = {
   { "RSolve", "rsolve", "RSolve[{a[n] == a[n-1] + a[n-2], a[0] == 0, a[1] == 1}, a, n]", "the closed form of a recurrence, by its characteristic roots", "Calculus" },
 
   /* --- several variables -------------------------------------------- */
-  { "Grad", "gradient", "Grad[f, {x, y}]", "the vector of first derivatives", "Several variables" },
+  { "Grad", "gradient", "Grad[f, {x, y}]", "the vector of first derivatives; gradient(list) of one list is MATLAB's numeric slope instead", "Several variables" },
   { "Div", "divergence", "Div[{p, q}, {x, y}]", "the divergence of a field", "Several variables" },
   { "Curl", "curl", "Curl[{p, q, r}, {x, y, z}]", "the curl of a field in three dimensions", "Several variables" },
   { "Laplacian", "laplacian", "Laplacian[f, {x, y}]", "the sum of the second derivatives", "Several variables" },
@@ -391,7 +391,8 @@ static const M42Function FUNCTIONS[] = {
   { "Through", NULL, "Through[{Sin, Cos}, 0]", "several functions given the same argument", "Lists" },
   { "hypot", NULL, "hypot(a, b)", "the long side of a right triangle", "Numbers" },
   { "nthroot", NULL, "nthroot(x, n)", "the real nth root, negative numbers included", "Numbers" },
-  { "deg2rad", "rad2deg", "deg2rad(180)", "degrees into radians, and back the other way", "Numbers" },
+  { "deg2rad", NULL, "deg2rad(180)", "degrees into radians", "Numbers" },
+  { "rad2deg", NULL, "rad2deg(Pi)", "radians into degrees", "Numbers" },
   { "primes", NULL, "primes(50)", "every prime up to n, by the sieve", "Discrete" },
   { "UpperTriangularize", "triu", "UpperTriangularize[m]", "the triangle above the diagonal, the rest zero", "Matrices" },
   { "LowerTriangularize", "tril", "LowerTriangularize[m]", "the triangle below it", "Matrices" },

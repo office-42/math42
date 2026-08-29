@@ -6862,25 +6862,49 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       /* The total of a matrix is the total of its rows -- a vector of
        * column sums -- which is what both languages mean by it. */
       guint rows, cols;
-      if (args->len == 1 && m42_value_is_matrix (ARG (0), &rows, &cols))
+      g_autoptr (GPtrArray) alone = NULL;
+      GPtrArray *adding = args;
+      guint levels = 1;
+
+      /* Total[list, n] adds over n levels: the second argument says
+       * how deep to go and is not another number to add.  It used to
+       * be added, so Total[{1, 2, 3}, 1] came back 7.  sum(A, 2) is
+       * MATLAB's dimension and is dealt with further up. */
+      if (args->len == 2 && strcmp (name, "Total") == 0 && is_num (ARG (1)))
         {
+          double deep = ARG (1)->u.number;
+
+          if (deep < 1 || deep != floor (deep))
+            return m42_value_error ("Total: the level is a whole number from one");
+          levels = (guint) deep;
+          alone = g_ptr_array_new ();
+          g_ptr_array_add (alone, ARG (0));
+          adding = alone;
+        }
+
+      if (levels == 1 && adding->len == 1 &&
+          m42_value_is_matrix (g_ptr_array_index (adding, 0), &rows, &cols))
+        {
+          const M42Value *m = g_ptr_array_index (adding, 0);
           M42Value *out = m42_value_list_new ();
+
           for (guint j = 0; j < cols; j++)
             {
               double acc = 0;
+
               for (guint i = 0; i < rows; i++)
-                acc += m42_value_list_nth (m42_value_list_nth (ARG (0), i), j)->u.number;
+                acc += m42_value_list_nth (m42_value_list_nth (m, i), j)->u.number;
               m42_value_list_append (out, m42_value_number (acc));
             }
           return out;
         }
       {
-        M42Value *exact = exact_fold (M42_TOK_PLUS, args, FALSE, FALSE);
+        M42Value *exact = exact_fold (M42_TOK_PLUS, adding, FALSE, FALSE);
 
         if (exact != NULL)
           return exact;
       }
-      return fold_args (name, args, 0.0, d_add);
+      return fold_args (name, adding, 0.0, d_add);
     }
   if (name_is (name, "Times", "prod"))
     {
@@ -7932,7 +7956,7 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
           return m42_value_number (answer);
         }
   }
-  if (name_is (name, "Beta", NULL) && args->len == 2)
+  if (name_is (name, "Beta", "beta") && args->len == 2)
     {
       double a, b;
       M42Value *err;

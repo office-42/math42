@@ -66,6 +66,14 @@ Instructions for AI agents:
     against its eigenvalue, a transform taken there and back, a series
     against the function it came from, and `N[exact] - N[decimal]`.
 
+  - **Both spellings of a function must answer the same.** Pull every
+    pair out of the table and call each with a handful of argument
+    shapes. Allow for the ones that are meant to differ — a capitalised
+    name is exact where its lower-case twin is numeric, and anything
+    random differs every time — and look at the rest. This found
+    `Total[{1, 2, 3}, 1]` answering 7, `beta` not answering at all, and
+    two rows that paired functions which are not the same function.
+
   Put a wrong check in on purpose first and watch it fail, or the sweep
   is only telling you what you want to hear.
 - To look at a change without a person at the keyboard:
