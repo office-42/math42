@@ -3417,6 +3417,157 @@ coefficient_of (const M42Node *expr, const char *name, double *out)
   return constant_fold (simple, out);
 }
 
+/* Abs[u] written as u, everywhere in a tree.  The integrating factor
+ * comes out of Exp[Log[Abs[x]]] and every textbook drops the bars at
+ * that step: the constant in front takes care of the sign, and
+ * carrying them further only makes the answer harder to read. */
+static M42Node *
+without_bars (const M42Node *n)
+{
+  M42Node *out;
+
+  if (n->kind == M42_NODE_CALL && n->children->len == 1 &&
+      (strcmp (n->name, "Abs") == 0 || strcmp (n->name, "abs") == 0))
+    return without_bars (m42_node_child (n, 0));
+
+  out = m42_node_new (n->kind);
+  out->op = n->op;
+  out->number = n->number;
+  out->name = g_strdup (n->name);
+  for (guint i = 0; i < n->children->len; i++)
+    g_ptr_array_add (out->children, without_bars (m42_node_child (n, i)));
+  return out;
+}
+
+/* y' + p(x) y == q(x), by the integrating factor Exp[INT p dx]:
+ *
+ *   y = (INT mu q dx + C1)/mu
+ *
+ * which is the method every first course teaches for a first order
+ * equation, and takes in the separable y' == f(x) y as the case where
+ * q is nothing at all.  NULL when the equation is not of that shape or
+ * one of the two integrals is not one math42 can do.
+ */
+static M42Node *
+first_order_linear (const M42Node *marked, const char *var)
+{
+  g_autoptr (M42Node) da = m42_node_differentiate (marked, "$y1");
+  g_autoptr (M42Node) db = m42_node_differentiate (marked, "$y0");
+  g_autoptr (M42Node) a = NULL, b = NULL, c = NULL;
+  g_autoptr (M42Node) p = NULL, q = NULL;
+  g_autoptr (M42Node) integral_p = NULL, mu = NULL, inner = NULL, integral_q = NULL;
+  double nothing;
+
+  if (da == NULL || db == NULL)
+    return NULL;
+  a = m42_node_simplify (da);
+  b = m42_node_simplify (db);
+  {
+    g_autoptr (M42Node) zero = m42_node_number (0);
+    g_autoptr (M42Node) without1 = m42_node_substitute (marked, "$y1", zero);
+    g_autoptr (M42Node) without0 = m42_node_substitute (without1, "$y0", zero);
+
+    c = m42_node_simplify (without0);
+  }
+
+  /* Linear means the coefficients hold no y of their own, and first
+   * order means there is no second derivative anywhere in it. */
+  {
+    static const char *const MARKS[] = { "$y0", "$y1", "$y2" };
+
+    for (guint i = 0; i < G_N_ELEMENTS (MARKS); i++)
+      if (m42_node_depends_on (a, MARKS[i]) || m42_node_depends_on (b, MARKS[i]) ||
+          m42_node_depends_on (c, MARKS[i]))
+        return NULL;
+  }
+  if (m42_node_depends_on (marked, "$y2"))
+    return NULL;
+  if (constant_fold (a, &nothing) && nothing == 0)
+    return NULL;
+
+  {
+    g_autoptr (M42Node) ratio = m42_node_binary (M42_TOK_SLASH, m42_node_copy (b),
+                                                 m42_node_copy (a));
+    g_autoptr (M42Node) minus_c = m42_node_unary (M42_TOK_MINUS, m42_node_copy (c));
+    g_autoptr (M42Node) other = m42_node_binary (M42_TOK_SLASH, g_steal_pointer (&minus_c),
+                                                 m42_node_copy (a));
+
+    p = m42_node_simplify (ratio);
+    q = m42_node_simplify (other);
+  }
+  if (p == NULL || q == NULL)
+    return NULL;
+
+  integral_p = m42_node_integrate (p, var);
+  if (integral_p == NULL)
+    return NULL;
+  {
+    g_autoptr (M42Node) plain = without_bars (integral_p);
+    g_autoptr (M42Node) raised = m42_node_call1 ("Exp", g_steal_pointer (&plain));
+
+    mu = m42_node_simplify (raised);
+  }
+  {
+    g_autoptr (M42Node) product = m42_node_binary (M42_TOK_STAR, m42_node_copy (mu),
+                                                   m42_node_copy (q));
+
+    inner = m42_node_simplify (product);
+  }
+  integral_q = m42_node_integrate (inner, var);
+  if (integral_q == NULL)
+    return NULL;
+  {
+    g_autoptr (M42Node) top = m42_node_binary (M42_TOK_PLUS, m42_node_copy (integral_q),
+                                               m42_node_ident ("C1"));
+    g_autoptr (M42Node) whole = m42_node_binary (M42_TOK_SLASH, g_steal_pointer (&top),
+                                                 m42_node_copy (mu));
+
+    return m42_node_simplify (whole);
+  }
+}
+
+/* An answer with one C1 in it, and a condition like y[0] == 3: the
+ * answer is a line in C1, so its value at nothing and at one settle
+ * which C1 it must be. */
+static M42Node *
+fit_one_constant (M42Session *s, const M42Node *answer, const char *var,
+                  const char *unknown, GPtrArray *conditions)
+{
+  const M42Node *cond;
+  double at, want, with_zero, with_one;
+
+  if (conditions->len != 1)
+    return NULL;
+  cond = g_ptr_array_index (conditions, 0);
+  if (cond->kind != M42_NODE_BINARY || cond->op != M42_TOK_EQ ||
+      m42_node_child (cond, 0)->kind != M42_NODE_CALL ||
+      strcmp (m42_node_child (cond, 0)->name, unknown) != 0 ||
+      m42_node_child (cond, 0)->children->len != 1 ||
+      !constant_fold (m42_node_child (m42_node_child (cond, 0), 0), &at) ||
+      !constant_fold (m42_node_child (cond, 1), &want))
+    return NULL;
+
+  {
+    g_autoptr (M42Node) zero = m42_node_number (0);
+    g_autoptr (M42Node) one = m42_node_number (1);
+    g_autoptr (M42Node) at_zero = m42_node_substitute (answer, "C1", zero);
+    g_autoptr (M42Node) at_one = m42_node_substitute (answer, "C1", one);
+
+    with_zero = number_at (s, at_zero, var, at);
+    with_one = number_at (s, at_one, var, at);
+  }
+  if (!isfinite (with_zero) || !isfinite (with_one) ||
+      fabs (with_one - with_zero) < 1e-14)
+    return NULL;
+  {
+    double c = (want - with_zero) / (with_one - with_zero);
+    g_autoptr (M42Node) found = coefficient_node (c);
+    g_autoptr (M42Node) filled = m42_node_substitute (answer, "C1", found);
+
+    return m42_node_simplify (filled);
+  }
+}
+
 /* The two solutions of the homogeneous equation, and one of the whole
  * equation, as trees in x. */
 typedef struct {
@@ -3615,7 +3766,26 @@ dsolve (M42Session *s, const M42Node *call)
   marked = mark_derivatives (left, unknown);
   if (!coefficient_of (marked, "$y2", &a) || !coefficient_of (marked, "$y1", &b) ||
       !coefficient_of (marked, "$y0", &c))
-    return m42_value_error ("DSolve: the equation must be linear with constant coefficients");
+    {
+      /* The coefficients are not numbers.  A first order equation can
+       * still be solved by its integrating factor, which is what a
+       * course reaches for when x appears in front of the y. */
+      M42Node *by_factor = first_order_linear (marked, var);
+
+      if (by_factor != NULL)
+        {
+          M42Node *fitted = fit_one_constant (s, by_factor, var, unknown, conditions);
+
+          if (fitted != NULL)
+            {
+              m42_node_free (by_factor);
+              return expr_result (fitted);
+            }
+          return expr_result (by_factor);
+        }
+      return m42_value_error ("DSolve: the equation must be linear, and of the first "
+                              "order when its coefficients are not numbers");
+    }
 
   /* What is left when the unknown is taken out is the forcing term. */
   {
@@ -3627,7 +3797,25 @@ dsolve (M42Session *s, const M42Node *call)
     double rest;
 
     if (!constant_fold (simple, &rest))
-      return m42_value_error ("DSolve: only a constant is allowed on the right");
+      {
+        /* Something of x on the right: the first order equation still
+         * comes out by its integrating factor. */
+        M42Node *by_factor = first_order_linear (marked, var);
+
+        if (by_factor != NULL)
+          {
+            M42Node *fitted = fit_one_constant (s, by_factor, var, unknown, conditions);
+
+            if (fitted != NULL)
+              {
+                m42_node_free (by_factor);
+                return expr_result (fitted);
+              }
+            return expr_result (by_factor);
+          }
+        return m42_value_error ("DSolve: only a constant is allowed on the right of an "
+                                "equation of the second order");
+      }
     f = -rest;
   }
 

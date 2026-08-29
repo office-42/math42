@@ -641,6 +641,18 @@ m42_node_simplify (const M42Node *n)
               m42_node_free (b);
               return m42_node_number (0);
             }
+          /* Dividing by an exponential is multiplying by the opposite
+           * one, which is how C1/Exp[-x^2/2] becomes C1 Exp[x^2/2]. */
+          if (b->kind == M42_NODE_CALL && b->children->len == 1 &&
+              (strcmp (b->name, "Exp") == 0 || strcmp (b->name, "exp") == 0))
+            {
+              M42Node *inside = g_ptr_array_steal_index (b->children, 0);
+              M42Node *flipped = m42_node_call1 (b->name,
+                                                 m42_node_unary (M42_TOK_MINUS, inside));
+
+              m42_node_free (b);
+              return simplify_and_free (m42_node_binary (M42_TOK_STAR, a, flipped));
+            }
           /* A minus sign underneath comes up in front, where it can
            * be read: w^2/(-8) is -(w^2/8). */
           if (is_number (b) && b->number < 0)
@@ -845,6 +857,23 @@ m42_node_simplify (const M42Node *n)
   r->name = g_strdup (n->name);
   for (guint i = 0; i < n->children->len; i++)
     g_ptr_array_add (r->children, m42_node_simplify (m42_node_child (n, i)));
+
+  /* Exp and Log undo one another, which is the step every integrating
+   * factor takes: Exp[Log[x]] is x. */
+  if (r->kind == M42_NODE_CALL && r->children->len == 1 &&
+      (strcmp (r->name, "Exp") == 0 || strcmp (r->name, "exp") == 0))
+    {
+      const M42Node *inside = m42_node_child (r, 0);
+
+      if (inside->kind == M42_NODE_CALL && inside->children->len == 1 &&
+          (strcmp (inside->name, "Log") == 0 || strcmp (inside->name, "log") == 0))
+        {
+          M42Node *under = m42_node_copy (m42_node_child (inside, 0));
+
+          m42_node_free (r);
+          return under;
+        }
+    }
 
   /* Sqrt of a perfect square is the number it is, so that a table
    * which writes Sqrt[2 A] does not leave Sqrt[4] standing when A is

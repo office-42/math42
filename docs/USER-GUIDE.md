@@ -522,7 +522,21 @@ with.
 
 ### Differential equations and recurrences
 
-`DSolve` solves the linear equations with constant coefficients. The
+`DSolve` solves the linear equations with constant coefficients, and a
+first order equation whose coefficients are anything it can integrate,
+by the integrating factor `Exp[Integrate[p, x]]`:
+
+```
+In[d1]:= DSolve[y' == x y, y, x]              Out[d1]= C1 Exp[x^2/2]
+In[d2]:= DSolve[y' + y/x == 1, y, x]          Out[d2]= (x^2/2 + C1)/x
+In[d3]:= DSolve[{y' == x y, y[0] == 5}, y, x] Out[d3]= 5 Exp[x^2/2]
+```
+
+The bars of the `Abs` that comes out of `Integrate[1/x, x]` are dropped
+at that step, as every textbook drops them: the constant in front takes
+care of the sign. A first order equation that is not linear — `y' == y^2`
+— is not solved.
+ The
 primes are written as Mathematica writes them, and conditions may
 follow in the list:
 
