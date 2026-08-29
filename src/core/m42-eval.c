@@ -7876,6 +7876,236 @@ vector_plot (M42Session *s, const M42Node *call)
   return out;
 }
 
+/* RegionPlot[x^2 + y^2 < 1, {x, a, b}, {y, c, d}]: the part of the
+ * plane where a condition holds, shaded.  It is a flat surface like
+ * the one DensityPlot makes, with nothing at all outside the region --
+ * the painter leaves a cell blank when its height is not a number, so
+ * saying "not a number" is how a hole is drawn. */
+static M42Value *
+region_plot (M42Session *s, const M42Node *call)
+{
+  const M42Node *cond, *xs, *ys;
+  const char *xvar, *yvar;
+  double x0, x1, y0, y1;
+  M42Value *err, *out;
+  M42Plot *p;
+  M42Surface *face;
+  const guint n = 121;
+  guint inside = 0;
+
+  if (call->children->len < 3)
+    return m42_value_error ("RegionPlot expects a condition, {x, a, b} and {y, c, d}");
+  cond = m42_node_child (call, 0);
+  xs = m42_node_child (call, 1);
+  ys = m42_node_child (call, 2);
+  if (xs->kind != M42_NODE_LIST || xs->children->len != 3 ||
+      ys->kind != M42_NODE_LIST || ys->children->len != 3 ||
+      m42_node_child (xs, 0)->kind != M42_NODE_IDENT ||
+      m42_node_child (ys, 0)->kind != M42_NODE_IDENT)
+    return m42_value_error ("RegionPlot expects {x, a, b} and {y, c, d}");
+  xvar = m42_node_child (xs, 0)->name;
+  yvar = m42_node_child (ys, 0)->name;
+  {
+    g_autoptr (M42Value) a = eval (s, m42_node_child (xs, 1));
+    g_autoptr (M42Value) b = eval (s, m42_node_child (xs, 2));
+    g_autoptr (M42Value) c = eval (s, m42_node_child (ys, 1));
+    g_autoptr (M42Value) d = eval (s, m42_node_child (ys, 2));
+
+    if (!need_number (a, "RegionPlot", &x0, &err) ||
+        !need_number (b, "RegionPlot", &x1, &err) ||
+        !need_number (c, "RegionPlot", &y0, &err) ||
+        !need_number (d, "RegionPlot", &y1, &err))
+      return err;
+  }
+  if (x1 <= x0 || y1 <= y0)
+    return m42_value_error ("RegionPlot: each range must go upwards");
+
+  out = m42_value_plot_new ();
+  p = out->u.plot;
+  p->xmin = x0;
+  p->xmax = x1;
+  p->ymin = y0;
+  p->ymax = y1;
+  p->xlabel = g_strdup (xvar);
+  p->ylabel = g_strdup (yvar);
+
+  face = g_new0 (M42Surface, 1);
+  face->nx = n;
+  face->ny = n;
+  face->z = g_new (double, (gsize) n * n);
+  face->xmin = x0;
+  face->xmax = x1;
+  face->ymin = y0;
+  face->ymax = y1;
+  /* One height everywhere it holds, so the region is of one colour
+   * rather than shaded as though it were a hill. */
+  face->zmin = 1;
+  face->zmax = 1;
+  face->flat = TRUE;
+  for (guint i = 0; i < n; i++)
+    for (guint j = 0; j < n; j++)
+      {
+        double x = x0 + (x1 - x0) * i / (double) (n - 1);
+        double y = y0 + (y1 - y0) * j / (double) (n - 1);
+        double holds = number_at2 (s, cond, xvar, x, yvar, y);
+
+        if (isfinite (holds) && holds > 0.5)
+          {
+            face->z[i * n + j] = 1;
+            inside++;
+          }
+        else
+          face->z[i * n + j] = NAN;
+      }
+  p->surface = face;
+  if (inside == 0)
+    {
+      m42_value_unref (out);
+      return m42_value_error ("RegionPlot: the condition holds nowhere in that range");
+    }
+  {
+    M42Value *bad = plot_options (s, call, 3, p);
+
+    if (bad != NULL)
+      {
+        m42_value_unref (out);
+        return bad;
+      }
+  }
+  return out;
+}
+
+/* StreamPlot[{p, q}, {x, a, b}, {y, c, d}]: the lines a speck of dust
+ * would follow through the field, rather than an arrow at each point
+ * of a grid.  Each line is walked out from its seed both ways by
+ * Runge-Kutta of the second order, with the step taken along the
+ * direction alone so that a strong part of the field does not make a
+ * long line of it.  A streamline is a series like any other, so
+ * nothing new has to be painted. */
+static M42Value *
+stream_plot (M42Session *s, const M42Node *call)
+{
+  const M42Node *parts, *xs, *ys;
+  const char *xvar, *yvar;
+  double x0, x1, y0, y1;
+  M42Value *err, *out;
+  M42Plot *p;
+  const guint seeds = 8;       /* seeds across and down */
+  const guint steps = 180;     /* how far each line is followed */
+
+  if (call->children->len < 3)
+    return m42_value_error ("StreamPlot expects {p, q}, {x, a, b} and {y, c, d}");
+  parts = m42_node_child (call, 0);
+  xs = m42_node_child (call, 1);
+  ys = m42_node_child (call, 2);
+  if (parts->kind != M42_NODE_LIST || parts->children->len != 2)
+    return m42_value_error ("StreamPlot expects two expressions in a list");
+  if (xs->kind != M42_NODE_LIST || xs->children->len != 3 ||
+      ys->kind != M42_NODE_LIST || ys->children->len != 3 ||
+      m42_node_child (xs, 0)->kind != M42_NODE_IDENT ||
+      m42_node_child (ys, 0)->kind != M42_NODE_IDENT)
+    return m42_value_error ("StreamPlot expects {x, a, b} and {y, c, d}");
+  xvar = m42_node_child (xs, 0)->name;
+  yvar = m42_node_child (ys, 0)->name;
+  {
+    g_autoptr (M42Value) a = eval (s, m42_node_child (xs, 1));
+    g_autoptr (M42Value) b = eval (s, m42_node_child (xs, 2));
+    g_autoptr (M42Value) c = eval (s, m42_node_child (ys, 1));
+    g_autoptr (M42Value) d = eval (s, m42_node_child (ys, 2));
+
+    if (!need_number (a, "StreamPlot", &x0, &err) ||
+        !need_number (b, "StreamPlot", &x1, &err) ||
+        !need_number (c, "StreamPlot", &y0, &err) ||
+        !need_number (d, "StreamPlot", &y1, &err))
+      return err;
+  }
+  if (x1 <= x0 || y1 <= y0)
+    return m42_value_error ("StreamPlot: each range must go upwards");
+
+  out = m42_value_plot_new ();
+  p = out->u.plot;
+  p->xmin = x0;
+  p->xmax = x1;
+  p->ymin = y0;
+  p->ymax = y1;
+  p->xlabel = g_strdup (xvar);
+  p->ylabel = g_strdup (yvar);
+
+  {
+    double step = MIN (x1 - x0, y1 - y0) / 90;
+
+    for (guint i = 0; i < seeds; i++)
+      for (guint j = 0; j < seeds; j++)
+        {
+          double sx = x0 + (x1 - x0) * (i + 0.5) / seeds;
+          double sy = y0 + (y1 - y0) * (j + 0.5) / seeds;
+          M42Series *line = NULL;
+
+          /* Backwards from the seed, then forwards, so that the line
+           * is one piece with the seed in the middle of it. */
+          for (int way = -1; way <= 1; way += 2)
+            {
+              double x = sx, y = sy;
+
+              for (guint k = 0; k < steps / 2; k++)
+                {
+                  double u = number_at2 (s, m42_node_child (parts, 0), xvar, x, yvar, y);
+                  double v = number_at2 (s, m42_node_child (parts, 1), xvar, x, yvar, y);
+                  double len = hypot (u, v);
+                  double mx, my, mu, mv, mlen;
+
+                  if (!isfinite (len) || len < 1e-12)
+                    break;
+                  /* Halfway along, and then the direction found there:
+                   * the midpoint rule, which follows a turn much more
+                   * closely than a straight step would. */
+                  mx = x + way * step * u / len / 2;
+                  my = y + way * step * v / len / 2;
+                  mu = number_at2 (s, m42_node_child (parts, 0), xvar, mx, yvar, my);
+                  mv = number_at2 (s, m42_node_child (parts, 1), xvar, mx, yvar, my);
+                  mlen = hypot (mu, mv);
+                  if (!isfinite (mlen) || mlen < 1e-12)
+                    break;
+                  x += way * step * mu / mlen;
+                  y += way * step * mv / mlen;
+                  if (x < x0 || x > x1 || y < y0 || y > y1)
+                    break;
+                  if (line == NULL)
+                    {
+                      line = m42_plot_add_series (p, M42_SERIES_LINE);
+                      /* All of one colour: these are not a hundred
+                       * different functions but one field, and the
+                       * usual cycle of colours would say otherwise. */
+                      line->r = 0.22;
+                      line->g = 0.42;
+                      line->b = 0.69;
+                      m42_series_add_point (line, sx, sy);
+                    }
+                  m42_series_add_point (line, x, y);
+                }
+              /* The two halves are drawn as two lines from the seed,
+               * which meet there and look like one. */
+              line = NULL;
+            }
+        }
+  }
+  if (p->series->len == 0)
+    {
+      m42_value_unref (out);
+      return m42_value_error ("StreamPlot: the field is nothing everywhere");
+    }
+  {
+    M42Value *bad = plot_options (s, call, 3, p);
+
+    if (bad != NULL)
+      {
+        m42_value_unref (out);
+        return bad;
+      }
+  }
+  return out;
+}
+
 /* ParametricPlot3D[{fx, fy, fz}, {t, a, b}]: where a point goes as t
  * runs, drawn in the same projection the surfaces use. */
 static M42Value *
@@ -14392,6 +14622,10 @@ eval_call (M42Session *s, const M42Node *n)
   /* quiver is MATLAB's name for the same picture.  StreamPlot is not:
    * it draws the lines a flow follows, not the arrows at each place,
    * and math42 does not have it. */
+  if (name_is (name, "StreamPlot", NULL))
+    return stream_plot (s, n);
+  if (name_is (name, "RegionPlot", NULL))
+    return region_plot (s, n);
   if (name_is (name, "VectorPlot", "quiver"))
     return vector_plot (s, n);
 

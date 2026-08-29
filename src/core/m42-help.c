@@ -33,6 +33,8 @@ static const M42Function FUNCTIONS[] = {
   { "Simplify", "simplify", "Simplify[e]", "folds the constants and drops the identities", "Algebra" },
   { "Solve", "NSolve", "Solve[lhs == rhs, x]", "every root of a polynomial; a list of linear equations and a list of unknowns solves a system", "Algebra" },
   { "FindFit", "lsqcurvefit", "FindFit[data, model, {a, b}, x]", "the parameters that fit the points best, by least squares", "Statistics" },
+  { "RegionPlot", NULL, "RegionPlot[cond, {x, a, b}, {y, c, d}]", "the part of the plane where a condition holds, shaded", "Graphs" },
+  { "StreamPlot", NULL, "StreamPlot[{p, q}, {x, a, b}, {y, c, d}]", "the lines a speck of dust would follow through the field", "Graphs" },
   { "Residue", NULL, "Residue[f, {x, a}]", "what is left of a function at a pole, up to order four", "Calculus" },
   { "Roots", NULL, "Roots[lhs == rhs, x]", "the same roots written as x == a || x == b", "Algebra" },
   { "subs", NULL, "subs(f, x, 3)", "x replaced by 3, MATLAB's way of writing /.", "Algebra" },

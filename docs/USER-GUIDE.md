@@ -945,6 +945,8 @@ In[s4]:= IntegerString[255, 16]                    Out[s4]= "ff"
 | `ContourPlot`/`contour` | the curves along which a function keeps its value |
 | `ParametricPlot3D[{x, y, z}, {t, a, b}]` | a curve through space |
 | `VectorPlot[{p, q}, {x, a, b}, {y, c, d}]`, `quiver` | which way a field points at each place — the direction field of `y' = f(x, y)` is `VectorPlot[{1, f}, …]` |
+| `StreamPlot[{p, q}, {x, a, b}, {y, c, d}]` | the same field drawn as the lines a speck of dust would follow through it |
+| `RegionPlot[cond, {x, a, b}, {y, c, d}]` | the part of the plane where a condition holds, shaded: `RegionPlot[y > x^2 && y < x + 2, …]` |
 | `DensityPlot[f, {x, a, b}, {y, c, d}]` | the same surface looked straight down on, painted by height |
 | `ListPlot3D[grid]`, `ListContourPlot[grid]`, `ListDensityPlot[grid]` | the same three from a grid of heights rather than from a function |
 | `LogPlot`/`semilogy`, `LogLogPlot`/`loglog` | an axis in powers of ten |
