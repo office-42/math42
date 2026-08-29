@@ -318,30 +318,59 @@ reference_fill (Reference *ref)
   const char *needle = gtk_editable_get_text (GTK_EDITABLE (ref->search));
   g_autofree char *folded = g_utf8_strdown (needle, -1);
   g_autoptr (GString) text = g_string_new (NULL);
-  const char *section = NULL;
+  g_autoptr (GPtrArray) sections = g_ptr_array_new ();
   guint shown = 0;
 
+  /* The sections in the order they first appear, each printed once
+   * with everything of its kind under it.  The table is not sorted by
+   * section -- a row is written next to the rows it belongs with,
+   * which is not always the same thing -- and heading it every time
+   * the section changed gave the reference "Lists" ten times over. */
   for (const M42Function *f = m42_functions (); f->name != NULL; f++)
     {
-      g_autofree char *joined = g_strdup_printf ("%s %s %s %s", f->name,
-                                                 f->matlab != NULL ? f->matlab : "",
-                                                 f->usage, f->summary);
-      g_autofree char *hay = g_utf8_strdown (joined, -1);
-      g_autofree char *usage = g_markup_escape_text (f->usage, -1);
-      g_autofree char *summary = g_markup_escape_text (f->summary, -1);
+      gboolean already = FALSE;
 
-      if (*folded != 0 && strstr (hay, folded) == NULL)
-        continue;
-      if (g_strcmp0 (section, f->section) != 0)
+      for (guint i = 0; i < sections->len; i++)
+        if (g_strcmp0 (g_ptr_array_index (sections, i), f->section) == 0)
+          already = TRUE;
+      if (!already)
+        g_ptr_array_add (sections, (gpointer) f->section);
+    }
+
+  for (guint i = 0; i < sections->len; i++)
+    {
+      const char *section = g_ptr_array_index (sections, i);
+      gboolean headed = FALSE;
+
+      for (const M42Function *f = m42_functions (); f->name != NULL; f++)
         {
-          section = f->section;
-          g_string_append_printf (text, "%s<b>%s</b>\n", shown > 0 ? "\n" : "", section);
+          g_autofree char *joined = NULL;
+          g_autofree char *hay = NULL;
+          g_autofree char *usage = NULL;
+          g_autofree char *summary = NULL;
+
+          if (g_strcmp0 (f->section, section) != 0)
+            continue;
+          joined = g_strdup_printf ("%s %s %s %s", f->name,
+                                    f->matlab != NULL ? f->matlab : "",
+                                    f->usage, f->summary);
+          hay = g_utf8_strdown (joined, -1);
+          if (*folded != 0 && strstr (hay, folded) == NULL)
+            continue;
+          usage = g_markup_escape_text (f->usage, -1);
+          summary = g_markup_escape_text (f->summary, -1);
+          if (!headed)
+            {
+              headed = TRUE;
+              g_string_append_printf (text, "%s<b>%s</b>\n", shown > 0 ? "\n" : "",
+                                      section);
+            }
+          g_string_append_printf (text, "  <tt>%s</tt>", usage);
+          if (f->matlab != NULL)
+            g_string_append_printf (text, "   <i>%s</i>", f->matlab);
+          g_string_append_printf (text, "\n      %s\n", summary);
+          shown++;
         }
-      g_string_append_printf (text, "  <tt>%s</tt>", usage);
-      if (f->matlab != NULL)
-        g_string_append_printf (text, "   <i>%s</i>", f->matlab);
-      g_string_append_printf (text, "\n      %s\n", summary);
-      shown++;
     }
   if (shown == 0)
     g_string_append (text, "Nothing here goes by that name.");
