@@ -819,6 +819,8 @@ In[s4]:= IntegerString[255, 16]                    Out[s4]= "ff"
 | `ListPlot`/`scatter`, `ListLinePlot`, `plot` | points, or points joined up |
 | `BarChart`/`bar`, `Histogram`/`hist` | bars, and data in bins |
 | `ContourPlot`/`contour` | the curves along which a function keeps its value |
+| `DensityPlot[f, {x, a, b}, {y, c, d}]` | the same surface looked straight down on, painted by height |
+| `ListPlot3D[grid]`, `ListContourPlot[grid]`, `ListDensityPlot[grid]` | the same three from a grid of heights rather than from a function |
 | `LogPlot`/`semilogy`, `LogLogPlot`/`loglog` | an axis in powers of ten |
 | `StemPlot`/`stem`, `StairsPlot`/`stairs` | two more ways of drawing a list |
 | `Show[p, q]` | graphs laid over one another |

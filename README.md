@@ -153,7 +153,9 @@ and `AllTrue`.
 projection with its mesh and a colour taken from its height,
 `ParametricPlot`, `PolarPlot`,
 `ContourPlot`/`contour` for the curves along which a function keeps its
-value, `LogPlot`/`semilogy` and `LogLogPlot`/`loglog` for an axis in
+value, `DensityPlot` for the same surface looked straight down on,
+`ListPlot3D`, `ListContourPlot` and `ListDensityPlot` for those three
+from a grid of numbers, `LogPlot`/`semilogy` and `LogLogPlot`/`loglog` for an axis in
 powers of ten,
 `ListPlot`, `ListLinePlot`, `BarChart`, `Histogram`, `StemPlot`/`stem`,
 `StairsPlot`/`stairs`, `Show` for graphs laid over one another, and
