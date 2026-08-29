@@ -607,6 +607,9 @@ In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + 1/2 u^2 + 1/6 u^3 + 1/24
 | `TrigReduce[e]` | products and powers of waves as a sum of plain waves: `Sin[x] Cos[x]` is `Sin[2 x]/2` |
 | `TrigExpand[e]` | the other way: `Sin[x + y]` is `Sin[x] Cos[y] + Cos[x] Sin[y]`, and `Sin[2 x]` is `2 Sin[x] Cos[x]` |
 | `Solve[lhs == rhs, x]` | every root of a polynomial, complex ones included |
+| `Roots[lhs == rhs, x]` | the same, written `x == a || x == b` |
+| `Variables[e]` | the letters in an expression |
+| `PolynomialQ[e, x]` | whether it is a polynomial in x |
 | `FindRoot[f, {x, x0}]`, `fzero` | one root, from a starting point |
 | `Sum[f, {i, a, b}]`, `Product[…]` | a sum to a named end gets its closed form |
 | `Sum[f, {i, a, Infinity}]` | a sum with no end: exact for a geometric series and for 1/n^2, 1/n^4, 1/n^6, added up when the terms die away fast, and left alone when they do not |
@@ -704,11 +707,13 @@ In[n]:= fft({1, 2, 3, 4})                     Out[n]= {10, -2 + 2 I, -2, -2 - 2 
 
 | | |
 |---|---|
-| `Det`, `Inverse`, `Transpose` (`A'`) | the usual three |
+| `Det`, `Inverse`, `Transpose` (`A'`) | the usual three; `Transpose` turns any list of lists, names and strings included |
+| `ConjugateTranspose`/`ctranspose` | rows for columns with every number conjugated |
 | `Dot[a, b]`, `a . b` | matrix multiplication |
-| `LinearSolve[a, b]`, `a \ b` | solves a x = b |
+| `LinearSolve[a, b]`, `linsolve`, `a \ b` | solves a x = b |
 | `Eigenvalues`, `Eigenvectors`, `Eigensystem` | Jacobi for a symmetric matrix, QR otherwise. The vectors are what each eigenvalue sends to nothing, for any matrix whose eigenvalues are real; where there are fewer vectors than values, the gap is filled with a vector of nothing, as Mathematica fills it |
-| `MatrixPower`, `Rank`, `Tr`, `Norm`, `Cross` | |
+| `MatrixPower`, `Rank`/`MatrixRank`, `Tr`, `Norm`, `Cross` | |
+| `Diagonal[m]`, `Diagonal[m, k]` | the diagonal, and the one k steps off it |
 | `IdentityMatrix`/`eye`, `zeros`, `ones` | |
 | `DiagonalMatrix`/`diag`, `ArrayReshape`/`reshape` | |
 | `Dimensions`/`size`, `size(A, 1)` | |
@@ -738,7 +743,8 @@ is `{I, -I}`.
 `Length`, `Total`/`sum`, `Mean`, `Median`, `Variance`,
 `StandardDeviation`, `Max`, `Min`, `Sort`, `Reverse`, `Flatten`,
 `Join`, `First`, `Last`, `Rest`, `Append`, `Take`, `Drop`,
-`Partition`, `Count`, `Position`/`find`, `Tally`, `Union`,
+`Partition`, `Count`, `Position`/`find`, `Tally`, `Counts`, `Ratios`,
+`Thread`, `Union`,
 `Intersection`, `Complement`, `Accumulate`/`cumsum`,
 `Differences`/`diff`, `AnyTrue`/`any`, `AllTrue`/`all`, `repmat`,
 `fliplr`, `flipud`, `cumprod`, `logspace`, `RandomChoice`,
@@ -786,8 +792,8 @@ and `polyder` and `polyint` for a polynomial kept as coefficients.
 
 `Map`/`arrayfun`, `Select`, `Fold`, `FoldList`, `Nest`, `NestList`,
 `NestWhile`, `NestWhileList`, `FixedPoint`, `FixedPointList`, `Apply`,
-`Through`, `Gather`, `GatherBy` and `GroupBy` — each of which takes
-either a pure function or the name of one:
+`Through`, `Gather`, `GatherBy`, `SplitBy` and `GroupBy` — each of
+which takes either a pure function or the name of one:
 
 ```
 In[31]:= Select[Range[10], PrimeQ]      Out[31]= {2, 3, 5, 7}
@@ -818,8 +824,15 @@ list is a MATLAB matrix and the two spellings collide.
 
 **Whole numbers.** `PowerMod`, `ExtendedGCD`, `ModularInverse`,
 `ChineseRemainder`, `FactorInteger`, `Divisors`, `EulerPhi`,
-`NextPrime`, `PrimePi` — with `GCD`, `LCM`, `Mod` and `PrimeQ` from the
-numbers section.
+`MoebiusMu`, `JacobiSymbol`, `NextPrime`, `PrimePi` — with `GCD`,
+`LCM`, `Mod` and `PrimeQ` from the numbers section.
+
+`HarmonicNumber[n]` is 1 + 1/2 + ... + 1/n and comes out exactly
+(`HarmonicNumber[5]` is `137/60`); `PartitionsP[n]` counts the ways n
+is a sum of whole numbers; `PolyGamma[x]` and `PolyGamma[n, x]` are the
+derivatives of `Log[Gamma[x]]`; and `ContinuedFraction[Pi, 5]` is
+`{3, 7, 15, 1, 292}`, which `FromContinuedFraction` turns back into
+`103993/33102`.
 
 **Counting.** `Subsets` (all of them, or those of one size),
 `Permutations` in dictionary order, `Binomial`, `Multinomial`,

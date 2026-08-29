@@ -50,7 +50,9 @@ walks anything else with Runge-Kutta.
 `Jacobian`, and an integral over more than one range done a variable at
 a time.
 
-**Discrete mathematics.** `PowerMod`, `ExtendedGCD`, `ChineseRemainder`,
+**Discrete mathematics.** `HarmonicNumber`, `PartitionsP`, `MoebiusMu`,
+`JacobiSymbol`, `ContinuedFraction`, `PolyGamma`,
+`PowerMod`, `ExtendedGCD`, `ChineseRemainder`,
 `FactorInteger`, `EulerPhi`, `Subsets`, `Permutations`, `StirlingS2`,
 and graphs held as a matrix with `ConnectedComponents`,
 `TransitiveClosure` and `GraphDistance`.

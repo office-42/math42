@@ -15,6 +15,9 @@ G_BEGIN_DECLS
 
 /* Appends the expression as the user would type it: 2 x + Sin[y]. */
 void m42_node_to_string (GString *out, const M42Node *n);
+
+/* Whether the tree is a polynomial in that letter, and of what degree. */
+gboolean m42_node_polynomial_q (const M42Node *n, const char *var, int *degree);
 void m42_number_to_string (GString *out, double x);
 
 /* Folds constants and drops the identities: x + 0, 1 x, x^1.

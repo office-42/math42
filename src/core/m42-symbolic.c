@@ -87,10 +87,17 @@ print_child (GString *out, const M42Node *parent, const M42Node *child, gboolean
                            (parent->op == M42_TOK_MINUS || parent->op == M42_TOK_SLASH ||
                             parent->op == M42_TOK_PERCENT);
   /* -3 Exp[x] reads perfectly well at the front of a product; it is
-   * only on the right of an operator, or under a power, that a
-   * negative number needs its brackets. */
+   * only on the right of an arithmetic operator, or under a power,
+   * that a negative number needs its brackets.  After == or && it
+   * needs none: x == -1 is how anybody writes it. */
+  gboolean arithmetic = parent->kind == M42_NODE_UNARY ||
+                        (parent->kind == M42_NODE_BINARY &&
+                         (parent->op == M42_TOK_PLUS || parent->op == M42_TOK_MINUS ||
+                          parent->op == M42_TOK_STAR || parent->op == M42_TOK_SLASH ||
+                          parent->op == M42_TOK_CARET || parent->op == M42_TOK_PERCENT ||
+                          parent->op == M42_TOK_DOT || parent->op == M42_TOK_BACKSLASH));
   gboolean negative_needs_it = child->kind == M42_NODE_NUMBER && child->number < 0 &&
-                               (right || pp >= 10);
+                               arithmetic && (right || pp >= 10);
   gboolean paren = cp < pp ||
                    (cp == pp && right && right_matters) ||
                    (cp == pp && !right && parent->kind == M42_NODE_BINARY && parent->op == M42_TOK_CARET) ||
@@ -2905,6 +2912,20 @@ integrate_node (const M42Node *n, const char *var, int depth)
     default:
       return NULL;
     }
+}
+
+gboolean
+m42_node_polynomial_q (const M42Node *n, const char *var, int *degree)
+{
+  int found = 0;
+
+  if (n == NULL || var == NULL)
+    return FALSE;
+  if (!is_polynomial (n, var, &found))
+    return FALSE;
+  if (degree != NULL)
+    *degree = found;
+  return TRUE;
 }
 
 M42Node *

@@ -506,6 +506,163 @@ static double as_double (const M42Value *v);
 /* One evaluated argument of the call being made. */
 #define ARG(i) ((M42Value *) g_ptr_array_index (args, (i)))
 
+/* The derivative of Log[Gamma[x]], and the derivatives of that.  The
+ * sum defining it converges too slowly to add up, so x is pushed up by
+ * the recurrence until the tail of the Euler-Maclaurin series is small,
+ * and the series is taken from there. */
+static double
+polygamma (int order, double x)
+{
+  double sum = 0, at;
+  const int PUSH = 12;
+
+  if (x <= 0 && x == floor (x))
+    return NAN;
+  /* psi(x) = psi(x + 1) - 1/x, and the same for each derivative. */
+  for (int k = 0; k < PUSH; k++)
+    {
+      if (order == 0)
+        sum -= 1.0 / (x + k);
+      else
+        sum += pow (x + k, -(order + 1.0));
+    }
+  at = x + PUSH;
+  if (order == 0)
+    return sum + log (at) - 1 / (2 * at) - 1 / (12 * at * at) +
+           1 / (120 * pow (at, 4)) - 1 / (252 * pow (at, 6));
+  {
+    /* The tail of the sum of (a + j)^-m, m = n + 1, by Euler-Maclaurin:
+     * the integral, half the first term, and the two corrections that
+     * carry it to the last digit a double holds. */
+    double tail = pow (at, -(double) order) / order +
+                  pow (at, -(order + 1.0)) / 2 +
+                  (order + 1.0) * pow (at, -(order + 2.0)) / 12 -
+                  (order + 1.0) * (order + 2.0) * (order + 3.0) *
+                    pow (at, -(order + 4.0)) / 720;
+    double factorial = 1;
+
+    for (int k = 2; k <= order; k++)
+      factorial *= k;
+    return (order % 2 == 0 ? -1 : 1) * factorial * (sum + tail);
+  }
+}
+
+/* A whole number written as a fraction of two, in lowest terms, as a
+ * value: the exact answers of a discrete mathematics course are of
+ * that kind and a decimal would lose them. */
+static M42Value *
+exact_fraction (gint64 p, gint64 q)
+{
+  gint64 u = p < 0 ? -p : p, v = q < 0 ? -q : q, g;
+
+  if (q == 0)
+    return m42_value_error ("a fraction over nothing");
+  while (v != 0)
+    {
+      gint64 t = u % v;
+
+      u = v;
+      v = t;
+    }
+  g = u == 0 ? 1 : u;
+  return m42_value_rational (p / g, q / g);
+}
+
+/* Two names in a pointer array, which holds each of them one step
+ * further away than a plain sort would look. */
+static gint
+by_name (gconstpointer a, gconstpointer b)
+{
+  return g_strcmp0 (*(const char *const *) a, *(const char *const *) b);
+}
+
+/* Every name in a tree that stands for a number rather than for a
+ * function or for one of the constants everybody knows. */
+static void
+gather_names (const M42Node *n, GPtrArray *out)
+{
+  static const char *const KNOWN[] = { "Pi", "E", "I", "Infinity", "Degree", "pi", "inf" };
+
+  if (n == NULL)
+    return;
+  if (n->kind == M42_NODE_IDENT)
+    {
+      for (guint i = 0; i < G_N_ELEMENTS (KNOWN); i++)
+        if (strcmp (n->name, KNOWN[i]) == 0)
+          return;
+      for (guint i = 0; i < out->len; i++)
+        if (strcmp (g_ptr_array_index (out, i), n->name) == 0)
+          return;
+      g_ptr_array_add (out, g_strdup (n->name));
+      return;
+    }
+  if (n->children == NULL)
+    return;
+  for (guint i = 0; i < n->children->len; i++)
+    gather_names (m42_node_child (n, i), out);
+}
+
+/* A list of lists turned on its side, whatever is in it.  A matrix of
+ * numbers is only the common case: a list of names, of strings or of
+ * complex numbers turns just as readily, and the matrix machinery
+ * underneath holds doubles and would refuse them all. */
+static M42Value *
+transpose_list (const M42Value *v)
+{
+  guint rows, cols = 0;
+
+  if (v->kind != M42_VALUE_LIST)
+    return NULL;
+  rows = m42_value_list_length (v);
+  if (rows == 0)
+    return NULL;
+  for (guint i = 0; i < rows; i++)
+    {
+      const M42Value *row = m42_value_list_nth (v, i);
+
+      if (row->kind != M42_VALUE_LIST)
+        return NULL;
+      if (i == 0)
+        cols = m42_value_list_length (row);
+      else if (m42_value_list_length (row) != cols)
+        return NULL;
+    }
+  if (cols == 0)
+    return NULL;
+  {
+    M42Value *out = m42_value_list_new ();
+
+    for (guint c = 0; c < cols; c++)
+      {
+        M42Value *row = m42_value_list_new ();
+
+        for (guint r = 0; r < rows; r++)
+          m42_value_list_append (row,
+            m42_value_ref (m42_value_list_nth (m42_value_list_nth (v, r), c)));
+        m42_value_list_append (out, row);
+      }
+    return out;
+  }
+}
+
+/* Every number in a list of lists with its imaginary half turned
+ * round, and anything that is not a number left as it is. */
+static M42Value *
+conjugate_value (const M42Value *v)
+{
+  if (v->kind == M42_VALUE_LIST)
+    {
+      M42Value *out = m42_value_list_new ();
+
+      for (guint i = 0; i < m42_value_list_length (v); i++)
+        m42_value_list_append (out, conjugate_value (m42_value_list_nth (v, i)));
+      return out;
+    }
+  if (v->kind == M42_VALUE_COMPLEX)
+    return from_complex (conj (as_complex (v)));
+  return m42_value_ref ((M42Value *) v);
+}
+
 static gboolean
 is_error (const M42Value *v)
 {
@@ -542,6 +699,15 @@ value_is_constant (const M42Value *v)
   double x;
 
   return v->kind == M42_VALUE_EXPR && value_number (v, &x);
+}
+
+/* A number, whether it was written as one or stands as Pi or E. */
+static gboolean
+numberish (const M42Value *v)
+{
+  double x;
+
+  return value_number (v, &x);
 }
 
 /* One conversion of sprintf, done through the C library so that the
@@ -7560,6 +7726,30 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       return out;
     }
 
+  /* The same for a plain list, which MATLAB reads as one row: sum(v, 1)
+   * is the row itself, since each column holds a single number, and
+   * sum(v, 2) is the total of it.  Without this the dimension fell
+   * through to the fold below and was added as though it were another
+   * number, so sum({1, 2, 3}, 2) came back 8. */
+  if (args->len == 2 && is_num (ARG (1)) && m42_value_is_vector (ARG (0)) &&
+      (name_is (name, "sum", NULL) || name_is (name, "mean", NULL) ||
+       name_is (name, "max", NULL) || name_is (name, "min", NULL) ||
+       name_is (name, "prod", NULL)))
+    {
+      int dim = (int) ARG (1)->u.number;
+
+      if (dim != 1 && dim != 2)
+        return m42_value_error ("%s: the dimension must be 1 or 2", name);
+      if (dim == 1)
+        return m42_value_ref (ARG (0));
+      {
+        g_autoptr (GPtrArray) one = g_ptr_array_new ();
+
+        g_ptr_array_add (one, ARG (0));
+        return call_builtin (s, name, one);
+      }
+    }
+
   if (name_is (name, "Total", "sum") || name_is (name, "Plus", NULL))
     {
       /* The total of a matrix is the total of its rows -- a vector of
@@ -7755,14 +7945,30 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
     }
 
   if (name_is (name, "Transpose", "transpose") && args->len == 1)
-    return m42_value_transpose (ARG (0));
+    {
+      M42Value *turned = transpose_list (ARG (0));
+
+      return turned != NULL ? turned : m42_value_transpose (ARG (0));
+    }
+  /* MATLAB's A' is this one, not the plain transpose, and for a real
+   * matrix the two are the same. */
+  if ((name_is (name, "ConjugateTranspose", "ctranspose") ||
+       name_is (name, "ConjugateTranspose", NULL)) && args->len == 1)
+    {
+      g_autoptr (M42Value) turned = transpose_list (ARG (0));
+
+      if (turned == NULL)
+        turned = m42_value_transpose (ARG (0));
+      return is_error (turned) ? g_steal_pointer (&turned) : conjugate_value (turned);
+    }
   if (name_is (name, "Det", "det") && args->len == 1)
     return m42_value_det (ARG (0));
   if (name_is (name, "Inverse", "inv") && args->len == 1)
     return m42_value_inverse (ARG (0));
   if (name_is (name, "Dot", "mtimes") && args->len == 2)
     return m42_value_dot (ARG (0), ARG (1));
-  if (name_is (name, "LinearSolve", "mldivide") && args->len == 2)
+  if ((name_is (name, "LinearSolve", "mldivide") ||
+       name_is (name, "LinearSolve", "linsolve")) && args->len == 2)
     return m42_value_linear_solve (ARG (0), ARG (1));
   if (name_is (name, "RowReduce", "rref") && args->len == 1)
     return m42_value_row_reduce (ARG (0));
@@ -8145,7 +8351,8 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
         return m42_value_error ("%s expects a whole exponent", name);
       return m42_value_matrix_power (ARG (0), (int) k);
     }
-  if (name_is (name, "Rank", "rank") && args->len == 1)
+  if ((name_is (name, "Rank", "rank") || name_is (name, "MatrixRank", NULL)) &&
+      args->len == 1)
     {
       /* The rank as row reduction finds it. */
       g_autoptr (M42Matrix) m = m42_matrix_from_value (ARG (0), FALSE);
@@ -8340,6 +8547,113 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
     }
 
   /* The ones that are the same, put together. */
+  /* A list cut where the answer changes, the neighbours staying
+   * neighbours: SplitBy[{1, 3, 2, 4}, EvenQ] is {{1, 3}, {2, 4}}. */
+  if (name_is (name, "SplitBy", NULL) && args->len == 2 &&
+      ARG (0)->kind == M42_VALUE_LIST)
+    {
+      M42Value *out = m42_value_list_new ();
+      M42Value *run = NULL;
+      g_autofree char *last = NULL;
+
+      for (guint i = 0; i < m42_value_list_length (ARG (0)); i++)
+        {
+          M42Value *e = m42_value_list_nth (ARG (0), i);
+          g_autoptr (GPtrArray) one =
+            g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
+          g_autoptr (M42Value) key = NULL;
+          g_autofree char *written = NULL;
+
+          g_ptr_array_add (one, m42_value_ref (e));
+          key = apply_callable (s, ARG (1), one);
+          if (is_error (key))
+            {
+              m42_value_unref (out);
+              return m42_value_ref (key);
+            }
+          written = m42_value_to_string (key);
+          if (run == NULL || g_strcmp0 (written, last) != 0)
+            {
+              run = m42_value_list_new ();
+              m42_value_list_append (out, run);
+            }
+          g_free (last);
+          last = g_steal_pointer (&written);
+          m42_value_list_append (run, m42_value_ref (e));
+        }
+      return out;
+    }
+
+  /* {a, b} -> {1, 2} handed round: {a -> 1, b -> 2}, which is how a
+   * list of rules is usually written down in the first place. */
+  if (name_is (name, "Thread", NULL) && args->len == 1 &&
+      ARG (0)->kind == M42_VALUE_EXPR && ARG (0)->u.expr->kind == M42_NODE_RULE &&
+      m42_node_child (ARG (0)->u.expr, 0)->kind == M42_NODE_LIST &&
+      m42_node_child (ARG (0)->u.expr, 1)->kind == M42_NODE_LIST)
+    {
+      const M42Node *left = m42_node_child (ARG (0)->u.expr, 0);
+      const M42Node *right = m42_node_child (ARG (0)->u.expr, 1);
+      M42Value *out;
+
+      if (left->children->len != right->children->len)
+        return m42_value_error ("Thread: the lists are of different lengths");
+      out = m42_value_list_new ();
+      for (guint i = 0; i < left->children->len; i++)
+        {
+          M42Node *rule = m42_node_new (M42_NODE_RULE);
+
+          g_ptr_array_add (rule->children, m42_node_copy (m42_node_child (left, i)));
+          g_ptr_array_add (rule->children, m42_node_copy (m42_node_child (right, i)));
+          m42_value_list_append (out, m42_value_expr (rule));
+        }
+      return out;
+    }
+
+  /* f[{a, b}, {c, d}] handed round the other way: {f[a, c], f[b, d]}. */
+  if (name_is (name, "Thread", NULL) && args->len == 1 &&
+      ARG (0)->kind == M42_VALUE_EXPR && ARG (0)->u.expr->kind == M42_NODE_CALL)
+    {
+      const M42Node *call = ARG (0)->u.expr;
+      guint how_many = 0;
+
+      for (guint i = 0; i < call->children->len; i++)
+        if (m42_node_child (call, i)->kind == M42_NODE_LIST)
+          {
+            guint len = m42_node_child (call, i)->children->len;
+
+            if (how_many != 0 && len != how_many)
+              return m42_value_error ("Thread: the lists are of different lengths");
+            how_many = len;
+          }
+      if (how_many == 0)
+        return m42_value_ref (ARG (0));
+      {
+        M42Value *out = m42_value_list_new ();
+
+        for (guint k = 0; k < how_many; k++)
+          {
+            M42Node *one = m42_node_new (M42_NODE_CALL);
+
+            one->name = g_strdup (call->name);
+            for (guint i = 0; i < call->children->len; i++)
+              {
+                const M42Node *arg = m42_node_child (call, i);
+
+                g_ptr_array_add (one->children,
+                                 m42_node_copy (arg->kind == M42_NODE_LIST
+                                                  ? m42_node_child (arg, k) : arg));
+              }
+            {
+              M42Value *done = eval (s, one);
+
+              m42_node_free (one);
+              m42_value_list_append (out, done);
+            }
+          }
+        return out;
+      }
+    }
+
   if ((name_is (name, "Gather", NULL) || name_is (name, "GatherBy", NULL) ||
        name_is (name, "GroupBy", NULL)) && args->len >= 1 &&
       ARG (0)->kind == M42_VALUE_LIST)
@@ -9745,6 +10059,207 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       return m42_value_number ((double) x);
     }
 
+  /* The counting functions of a discrete mathematics course. */
+  if ((name_is (name, "HarmonicNumber", NULL) || name_is (name, "PartitionsP", NULL) ||
+       name_is (name, "MoebiusMu", NULL)) && args->len == 1 && is_num (ARG (0)))
+    {
+      double x = ARG (0)->u.number;
+      gint64 n = (gint64) x;
+
+      if (x != floor (x) || n < 0)
+        return m42_value_error ("%s wants a whole number, and not a negative one", name);
+
+      if (name_is (name, "HarmonicNumber", NULL))
+        {
+          gint64 p = 0, q = 1;
+          double loose = 0;
+
+          if (n > 100000)
+            return m42_value_error ("HarmonicNumber: a hundred thousand is enough");
+          for (gint64 k = 1; k <= n; k++)
+            {
+              loose += 1.0 / (double) k;
+              /* Exactly, while the numbers still fit; then the sum of
+               * the decimals, which is all anybody wants that far
+               * out. */
+              if (q != 0 && q < 100000000000000LL)
+                {
+                  gint64 np = p * k + q, nq = q * k, u = np < 0 ? -np : np, v = nq, g;
+
+                  while (v != 0)
+                    {
+                      gint64 t = u % v;
+
+                      u = v;
+                      v = t;
+                    }
+                  g = u == 0 ? 1 : u;
+                  p = np / g;
+                  q = nq / g;
+                }
+              else
+                q = 0;
+            }
+          return q == 0 ? m42_value_number (loose) : exact_fraction (p, q);
+        }
+
+      if (name_is (name, "PartitionsP", NULL))
+        {
+          /* Every way of writing n as a sum, counted by filling a row
+           * of the table one part at a time. */
+          g_autofree double *ways = NULL;
+
+          if (n > 250)
+            return m42_value_error ("PartitionsP: the count runs over past 250");
+          ways = g_new0 (double, n + 1);
+          ways[0] = 1;
+          for (gint64 part = 1; part <= n; part++)
+            for (gint64 up_to = part; up_to <= n; up_to++)
+              ways[up_to] += ways[up_to - part];
+          return m42_value_number (ways[n]);
+        }
+
+      /* MoebiusMu: nothing when a square divides it, and otherwise the
+       * sign of the number of its factors. */
+      {
+        gint64 left = n;
+        int factors = 0;
+
+        if (n == 0)
+          return m42_value_error ("MoebiusMu wants a number of one or more");
+        for (gint64 d = 2; d * d <= left; d++)
+          if (left % d == 0)
+            {
+              left /= d;
+              factors++;
+              if (left % d == 0)
+                return m42_value_number (0);
+            }
+        if (left > 1)
+          factors++;
+        return m42_value_number (factors % 2 == 0 ? 1 : -1);
+      }
+    }
+
+  /* Whether a is a square to the modulus n, in Legendre's sign and
+   * Jacobi's reading of it. */
+  if (name_is (name, "JacobiSymbol", NULL) && args->len == 2 &&
+      is_num (ARG (0)) && is_num (ARG (1)))
+    {
+      double da = ARG (0)->u.number, dn = ARG (1)->u.number;
+      gint64 a, n;
+      int sign = 1;
+
+      if (da != floor (da) || dn != floor (dn) || dn <= 0 || ((gint64) dn) % 2 == 0)
+        return m42_value_error ("JacobiSymbol wants a whole number and an odd one above it");
+      n = (gint64) dn;
+      a = ((gint64) da) % n;
+      if (a < 0)
+        a += n;
+      while (a != 0)
+        {
+          while (a % 2 == 0)
+            {
+              a /= 2;
+              if (n % 8 == 3 || n % 8 == 5)
+                sign = -sign;
+            }
+          {
+            gint64 swap = a;
+
+            a = n;
+            n = swap;
+          }
+          if (a % 4 == 3 && n % 4 == 3)
+            sign = -sign;
+          a %= n;
+        }
+      return m42_value_number (n == 1 ? sign : 0);
+    }
+
+  if (name_is (name, "PolyGamma", "psi") && (args->len == 1 || args->len == 2) &&
+      numberish (ARG (0)) && (args->len == 1 || numberish (ARG (1))))
+    {
+      double first = 0, second = 0;
+      int order;
+      double at;
+
+      if (!value_number (ARG (0), &first) ||
+          (args->len == 2 && !value_number (ARG (1), &second)))
+        return m42_value_error ("PolyGamma wants numbers");
+      order = args->len == 2 ? (int) first : 0;
+      at = args->len == 2 ? second : first;
+
+      if (order < 0 || order > 12)
+        return m42_value_error ("PolyGamma: the order has to be between 0 and 12");
+      return m42_value_number (polygamma (order, at));
+    }
+
+  /* The whole numbers a number breaks into as a fraction of fractions:
+   * ContinuedFraction[Pi, 5] is {3, 7, 15, 1, 292}. */
+  if (name_is (name, "ContinuedFraction", NULL) && args->len >= 1 &&
+      numberish (ARG (0)))
+    {
+      double left = 0, how_many = 10;
+      guint want;
+
+      if (!value_number (ARG (0), &left))
+        return m42_value_error ("ContinuedFraction wants a number");
+      if (args->len == 2)
+        value_number (ARG (1), &how_many);
+      want = (guint) how_many;
+      M42Value *out = m42_value_list_new ();
+
+      if (want < 1 || want > 100)
+        want = 10;
+      for (guint i = 0; i < want; i++)
+        {
+          double whole = floor (left);
+
+          m42_value_list_append (out, m42_value_number (whole));
+          left -= whole;
+          if (fabs (left) < 1e-12)
+            break;
+          left = 1 / left;
+        }
+      return out;
+    }
+
+  if (name_is (name, "FromContinuedFraction", NULL) && args->len == 1 &&
+      m42_value_is_vector (ARG (0)))
+    {
+      guint n = m42_value_list_length (ARG (0));
+      gint64 p = 0, q = 1;
+
+      if (n == 0)
+        return m42_value_error ("FromContinuedFraction wants a list of whole numbers");
+      for (guint i = n; i > 0; i--)
+        {
+          const M42Value *e = m42_value_list_nth (ARG (0), i - 1);
+          double x;
+          gint64 whole, np, nq;
+
+          if (!is_numeric (e))
+            return m42_value_error ("FromContinuedFraction wants whole numbers");
+          x = as_double (e);
+          if (x != floor (x))
+            return m42_value_error ("FromContinuedFraction wants whole numbers");
+          whole = (gint64) x;
+          /* whole + q/p, turned back the other way up. */
+          np = whole * p + q;
+          nq = p;
+          if (i == n)
+            {
+              np = whole;
+              nq = 1;
+            }
+          p = np;
+          q = nq;
+        }
+      return q == 0 ? m42_value_error ("FromContinuedFraction: a fraction over nothing")
+                    : exact_fraction (p, q);
+    }
+
   if ((name_is (name, "FactorInteger", "factor") || name_is (name, "Divisors", "divisors") ||
        name_is (name, "EulerPhi", "totient") || name_is (name, "NextPrime", NULL) ||
        name_is (name, "PrimePi", NULL)) && args->len == 1 && is_num (ARG (0)))
@@ -10263,6 +10778,124 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
           }
       return out;
     }
+  /* The same count, written as the rules an association is made of. */
+  /* The letters in an expression, in the order the alphabet has them. */
+  if (name_is (name, "Variables", "symvar") && args->len == 1)
+    {
+      g_autoptr (M42Node) tree = value_to_node (ARG (0));
+      g_autoptr (GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
+      M42Value *out = m42_value_list_new ();
+
+      if (tree == NULL)
+        return out;
+      gather_names (tree, names);
+      g_ptr_array_sort (names, by_name);
+      for (guint i = 0; i < names->len; i++)
+        m42_value_list_append (out, m42_value_expr (
+          m42_node_ident (g_ptr_array_index (names, i))));
+      return out;
+    }
+
+  if (name_is (name, "PolynomialQ", NULL) && args->len == 2)
+    {
+      g_autoptr (M42Node) tree = value_to_node (ARG (0));
+      const char *var = NULL;
+
+      if (ARG (1)->kind == M42_VALUE_EXPR && ARG (1)->u.expr->kind == M42_NODE_IDENT)
+        var = ARG (1)->u.expr->name;
+      if (tree == NULL || var == NULL)
+        return m42_value_error ("PolynomialQ wants an expression and a letter");
+      return m42_value_number (m42_node_polynomial_q (tree, var, NULL));
+    }
+
+  if (name_is (name, "Counts", NULL) && args->len == 1 && ARG (0)->kind == M42_VALUE_LIST)
+    {
+      M42Value *out = m42_value_list_new ();
+      g_autoptr (GPtrArray) seen = g_ptr_array_new_with_free_func (g_free);
+
+      for (guint i = 0; i < m42_value_list_length (ARG (0)); i++)
+        {
+          M42Value *e = m42_value_list_nth (ARG (0), i);
+          g_autofree char *key = m42_value_to_string (e);
+          gboolean already = FALSE;
+          guint count = 0;
+
+          for (guint k = 0; k < seen->len; k++)
+            if (strcmp (g_ptr_array_index (seen, k), key) == 0)
+              already = TRUE;
+          if (already)
+            continue;
+          for (guint k = 0; k < m42_value_list_length (ARG (0)); k++)
+            {
+              g_autofree char *other = m42_value_to_string (m42_value_list_nth (ARG (0), k));
+
+              if (strcmp (other, key) == 0)
+                count++;
+            }
+          g_ptr_array_add (seen, g_strdup (key));
+          {
+            g_autoptr (M42Node) left = value_to_node (e);
+            M42Node *rule;
+
+            if (left == NULL)
+              continue;
+            rule = m42_node_new (M42_NODE_RULE);
+            g_ptr_array_add (rule->children, g_steal_pointer (&left));
+            g_ptr_array_add (rule->children, m42_node_number (count));
+            m42_value_list_append (out, m42_value_expr (rule));
+          }
+        }
+      return out;
+    }
+
+  /* The diagonal of a matrix, and the ones above and below it. */
+  if (name_is (name, "Diagonal", NULL) && args->len >= 1 &&
+      ARG (0)->kind == M42_VALUE_LIST)
+    {
+      M42Value *out = m42_value_list_new ();
+      double away = 0;
+      gint64 k;
+
+      if (args->len == 2)
+        value_number (ARG (1), &away);
+      k = (gint64) away;
+      for (guint r = 0; r < m42_value_list_length (ARG (0)); r++)
+        {
+          const M42Value *row = m42_value_list_nth (ARG (0), r);
+          gint64 c = (gint64) r + k;
+
+          if (row->kind != M42_VALUE_LIST)
+            {
+              m42_value_unref (out);
+              return m42_value_error ("Diagonal wants a list of lists");
+            }
+          if (c >= 0 && c < (gint64) m42_value_list_length (row))
+            m42_value_list_append (out, m42_value_ref (m42_value_list_nth (row, (guint) c)));
+        }
+      return out;
+    }
+
+  /* One term over the one before it, all the way along. */
+  if (name_is (name, "Ratios", NULL) && args->len == 1 && ARG (0)->kind == M42_VALUE_LIST)
+    {
+      M42Value *out = m42_value_list_new ();
+      guint n = m42_value_list_length (ARG (0));
+
+      for (guint i = 1; i < n; i++)
+        {
+          M42Value *ratio = map2 (M42_TOK_SLASH, m42_value_list_nth (ARG (0), i),
+                                  m42_value_list_nth (ARG (0), i - 1));
+
+          if (is_error (ratio))
+            {
+              m42_value_unref (out);
+              return ratio;
+            }
+          m42_value_list_append (out, ratio);
+        }
+      return out;
+    }
+
   if (name_is (name, "Tally", NULL) && args->len == 1 && ARG (0)->kind == M42_VALUE_LIST)
     {
       M42Value *out = m42_value_list_new ();
@@ -12331,6 +12964,39 @@ eval_call (M42Session *s, const M42Node *n)
 
   if (name_is (name, "FindRoot", NULL))     return find_root (s, n, FALSE);
   if (name_is (name, "fzero", NULL))        return find_root (s, n, TRUE);
+  /* The same answers as Solve, written the way a textbook writes them:
+   * x == -1 || x == 1 rather than a list of rules. */
+  if (name_is (name, "Roots", NULL) && n->children->len == 2)
+    {
+      g_autoptr (M42Value) found = solve (s, n);
+      M42Node *whole = NULL;
+
+      if (is_error (found))
+        return g_steal_pointer (&found);
+      if (found->kind != M42_VALUE_LIST || m42_value_list_length (found) == 0)
+        return m42_value_error ("Roots: no root of that was found");
+      for (guint i = 0; i < m42_value_list_length (found); i++)
+        {
+          const M42Value *one = m42_value_list_nth (found, i);
+          const M42Node *rule;
+          M42Node *equation;
+
+          if (one->kind == M42_VALUE_LIST && m42_value_list_length (one) == 1)
+            one = m42_value_list_nth (one, 0);
+          if (one->kind != M42_VALUE_EXPR || one->u.expr->kind != M42_NODE_RULE)
+            continue;
+          rule = one->u.expr;
+          equation = m42_node_binary (M42_TOK_EQ,
+                                      m42_node_copy (m42_node_child (rule, 0)),
+                                      m42_node_copy (m42_node_child (rule, 1)));
+          whole = whole == NULL ? equation
+                                : m42_node_binary (M42_TOK_OR, whole, equation);
+        }
+      if (whole == NULL)
+        return m42_value_error ("Roots: no root of that was found");
+      return m42_value_expr (whole);
+    }
+
   if (name_is (name, "Solve", "NSolve"))
     {
       /* A list of equations and a list of unknowns is a system. */
