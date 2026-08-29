@@ -35,6 +35,7 @@ static const M42Function FUNCTIONS[] = {
   { "FindFit", "lsqcurvefit", "FindFit[data, model, {a, b}, x]", "the parameters that fit the points best, by least squares", "Statistics" },
   { "Residue", NULL, "Residue[f, {x, a}]", "what is left of a function at a pole, up to order four", "Calculus" },
   { "Roots", NULL, "Roots[lhs == rhs, x]", "the same roots written as x == a || x == b", "Algebra" },
+  { "subs", NULL, "subs(f, x, 3)", "x replaced by 3, MATLAB's way of writing /.", "Algebra" },
   { "Variables", "symvar", "Variables[e]", "the letters in an expression", "Algebra" },
   { "PolynomialQ", NULL, "PolynomialQ[e, x]", "whether the expression is a polynomial in x", "Algebra" },
   { "FindRoot", "fzero", "FindRoot[f, {x, x0}]", "one root, from a starting point, by Newton's method", "Algebra" },

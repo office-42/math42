@@ -1100,6 +1100,55 @@ exact_value_of (double x)
   return NULL;
 }
 
+/* An angle as a fraction of Pi, when it is a simple one.  Sin[Pi/6]
+ * has been 1/2 all along; this is the way back, so that ArcSin[1/2] is
+ * Pi/6 rather than 0.5235987755982989.  Only the inverse functions ask
+ * for it: a number that happens to be near a fraction of Pi is not an
+ * angle unless it came from one. */
+static M42Value *
+exact_angle (double x)
+{
+  if (!isfinite (x))
+    return NULL;
+  if (fabs (x) < 1e-15)
+    return m42_value_number (0);
+  for (int den = 1; den <= 12; den++)
+    {
+      double scaled = x * den / G_PI;
+
+      if (fabs (scaled - round (scaled)) < 1e-12 && round (scaled) != 0)
+        {
+          gint64 num = (gint64) round (scaled);
+          M42Node *whole = m42_node_ident ("Pi");
+          gboolean minus = num < 0;
+
+          if (minus)
+            num = -num;
+          if (num != 1)
+            whole = m42_node_binary (M42_TOK_STAR, m42_node_number ((double) num), whole);
+          if (den != 1)
+            whole = m42_node_binary (M42_TOK_SLASH, whole, m42_node_number (den));
+          if (minus)
+            whole = m42_node_unary (M42_TOK_MINUS, whole);
+          return m42_value_expr (whole);
+        }
+    }
+  return NULL;
+}
+
+/* The functions whose answer is an angle. */
+static gboolean
+gives_an_angle (const char *canon)
+{
+  static const char *const ANGLES[] = { "ArcSin", "ArcCos", "ArcTan", "ArcCot",
+                                        "ArcSec", "ArcCsc" };
+
+  for (guint i = 0; i < G_N_ELEMENTS (ANGLES); i++)
+    if (strcmp (canon, ANGLES[i]) == 0)
+      return TRUE;
+  return FALSE;
+}
+
 /* Sqrt of a whole number, with whatever square factors it has taken
  * out: Sqrt[8] is 2 Sqrt[2], and Sqrt[9] is plain 3. */
 static M42Value *
@@ -1153,7 +1202,11 @@ map1_full (M42Value *a, const char *canon, double (*fn) (double), gboolean exact
        * Abs[-3/4] is 3/4 rather than 0.75. */
       if (a->exact)
         {
-          M42Value *known = exact_value_of (fn (a->u.number));
+          M42Value *known = gives_an_angle (canon) ? exact_angle (fn (a->u.number))
+                                                   : NULL;
+
+          if (known == NULL)
+            known = exact_value_of (fn (a->u.number));
           if (known != NULL)
             return known;
         }
@@ -1179,7 +1232,9 @@ map1_full (M42Value *a, const char *canon, double (*fn) (double), gboolean exact
           /* A MATLAB name wants the number, whatever it is. */
           if (!exact)
             return m42_value_real (fn (folded));
-          known = exact_value_of (fn (folded));
+          known = gives_an_angle (canon) ? exact_angle (fn (folded)) : NULL;
+          if (known == NULL)
+            known = exact_value_of (fn (folded));
           if (known != NULL)
             return known;
         }
@@ -6608,6 +6663,164 @@ polished_root (M42Session *s, const M42Node *f, const char *var, double root)
   return root;
 }
 
+/* Sin[2 x] == 1/2 turned round rather than scanned for roots: when one
+ * side is a function of the unknown that has an inverse and the other
+ * side has no unknown in it, the inverse says what the inside must be,
+ * and the inside is a line the rest of the way.
+ *
+ * The waves have no end of solutions, and the two the principal
+ * inverse gives are the ones Mathematica names too -- the rest are
+ * those plus whole turns.  NULL when the equation is not of that
+ * shape, and the scan below answers instead. */
+static M42Value *
+solve_by_inverting (M42Session *s, const M42Node *lhs, const char *var)
+{
+  static const struct { const char *name, *lower, *inverse; int kind; } TURN[] = {
+    /* kind: 0 one answer, 1 Pi minus it as well, 2 minus it as well */
+    { "Sin", "sin", "ArcSin", 1 },   { "Cos", "cos", "ArcCos", 2 },
+    { "Tan", "tan", "ArcTan", 0 },   { "Exp", "exp", "Log", 0 },
+    { "Log", "log", "Exp", 0 },      { "ArcSin", "asin", "Sin", 0 },
+    { "ArcCos", "acos", "Cos", 0 },  { "ArcTan", "atan", "Tan", 0 },
+  };
+  const M42Node *outer = NULL, *other = NULL;
+  const M42Node *inside;
+  int which = -1;
+  double slope, at_zero, known;
+
+  /* One side a call of the unknown, the other side without it. */
+  if (lhs->kind != M42_NODE_BINARY || lhs->op != M42_TOK_MINUS)
+    return NULL;
+  for (int side = 0; side < 2; side++)
+    {
+      const M42Node *a = m42_node_child (lhs, side);
+      const M42Node *b = m42_node_child (lhs, 1 - side);
+
+      if (a->kind == M42_NODE_CALL && a->children->len == 1 &&
+          m42_node_depends_on (a, var) && !m42_node_depends_on (b, var))
+        {
+          outer = a;
+          other = b;
+        }
+    }
+  if (outer == NULL)
+    return NULL;
+  for (guint i = 0; i < G_N_ELEMENTS (TURN); i++)
+    if (strcmp (outer->name, TURN[i].name) == 0 || strcmp (outer->name, TURN[i].lower) == 0)
+      which = (int) i;
+  if (which < 0)
+    return NULL;
+  if (!constant_fold (other, &known))
+    return NULL;
+  /* A wave never leaves its banks. */
+  if ((TURN[which].kind != 0 || strcmp (TURN[which].name, "Tan") == 0) &&
+      (strcmp (TURN[which].name, "Sin") == 0 || strcmp (TURN[which].name, "Cos") == 0) &&
+      fabs (known) > 1)
+    return NULL;
+  if (strcmp (TURN[which].name, "Exp") == 0 && known <= 0)
+    return NULL;
+
+  /* Inside must be a line in the unknown: a x + b. */
+  inside = m42_node_child (outer, 0);
+  {
+    g_autoptr (M42Node) slope_node = m42_node_differentiate (inside, var);
+    g_autoptr (M42Node) tidy = slope_node != NULL ? m42_node_simplify (slope_node) : NULL;
+    g_autoptr (M42Node) zero = m42_node_number (0);
+    g_autoptr (M42Node) without = m42_node_substitute (inside, var, zero);
+    g_autoptr (M42Node) folded = without != NULL ? m42_node_simplify (without) : NULL;
+
+    if (tidy == NULL || folded == NULL || !constant_fold (tidy, &slope) ||
+        !constant_fold (folded, &at_zero) || fabs (slope) < 1e-14)
+      return NULL;
+  }
+
+  {
+    M42Value *out = m42_value_list_new ();
+    M42Node *answers[2] = { NULL, NULL };
+    guint how_many = 1;
+
+    answers[0] = m42_node_call1 (TURN[which].inverse, m42_node_copy (other));
+    if (TURN[which].kind == 1)
+      {
+        /* Sin: Pi - the angle is a solution too. */
+        answers[1] = m42_node_binary (M42_TOK_MINUS, m42_node_ident ("Pi"),
+                                      m42_node_call1 (TURN[which].inverse,
+                                                      m42_node_copy (other)));
+        how_many = 2;
+      }
+    else if (TURN[which].kind == 2)
+      {
+        answers[1] = m42_node_unary (M42_TOK_MINUS,
+                                     m42_node_call1 (TURN[which].inverse,
+                                                     m42_node_copy (other)));
+        how_many = 2;
+      }
+
+    for (guint i = 0; i < how_many; i++)
+      {
+        /* a x + b == answer, so x is (answer - b)/a. */
+        M42Node *shifted = at_zero == 0
+          ? answers[i]
+          : m42_node_binary (M42_TOK_MINUS, answers[i], m42_node_number (at_zero));
+        M42Node *scaled = slope == 1 ? shifted
+          : m42_node_binary (M42_TOK_SLASH, shifted, m42_node_number (slope));
+        g_autoptr (M42Node) tidy = NULL;
+        M42Node *rule;
+
+        /* Worked out the way the rest of the program would work it
+         * out, so that ArcSin[1/2] is Pi/6 and Log[5] is the number
+         * every other Log[5] in math42 is. */
+        {
+          g_autoptr (M42Node) plain = m42_node_simplify (scaled);
+          g_autoptr (M42Value) worked = plain != NULL ? eval (s, plain) : NULL;
+
+          if (worked != NULL && !is_error (worked))
+            {
+              g_autoptr (M42Node) as_node = value_to_node (worked);
+
+              if (as_node != NULL)
+                tidy = simplify_hard (s, as_node);
+            }
+          if (tidy == NULL && plain != NULL)
+            tidy = m42_node_copy (plain);
+        }
+        M42Value *pair;
+        gboolean already = FALSE;
+
+        m42_node_free (scaled);
+        if (tidy == NULL)
+          continue;
+        /* Cos[x] == 1 has one answer written twice. */
+        {
+          g_autoptr (GString) written = g_string_new (NULL);
+
+          m42_node_to_string (written, tidy);
+          for (guint k = 0; k < m42_value_list_length (out); k++)
+            {
+              g_autofree char *before =
+                m42_value_to_string (m42_value_list_nth (out, k));
+
+              if (strstr (before, written->str) != NULL)
+                already = TRUE;
+            }
+        }
+        if (already)
+          continue;
+        rule = m42_node_new (M42_NODE_RULE);
+        g_ptr_array_add (rule->children, m42_node_ident (var));
+        g_ptr_array_add (rule->children, m42_node_copy (tidy));
+        pair = m42_value_list_new ();
+        m42_value_list_append (pair, m42_value_expr (rule));
+        m42_value_list_append (out, pair);
+      }
+    if (m42_value_list_length (out) == 0)
+      {
+        m42_value_unref (out);
+        return NULL;
+      }
+    return out;
+  }
+}
+
 static M42Value *
 solve (M42Session *s, const M42Node *call)
 {
@@ -6684,6 +6897,19 @@ solve (M42Session *s, const M42Node *call)
               }
             return out;
           }
+      }
+  }
+
+  /* Not a polynomial at all, but a function of the unknown that can be
+   * turned round: Sin[x] == 1/2 is Pi/6, not a scan for sign changes. */
+  {
+    M42Value *turned = solve_by_inverting (s, lhs, var);
+
+    if (turned != NULL)
+      {
+        m42_value_unref (out);
+        g_array_unref (roots);
+        return turned;
       }
   }
 
@@ -9950,6 +10176,25 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
         return m42_value_error ("FreeQ wants something to look for");
       return m42_value_number (!m42_node_contains (tree, shape, pattern_test, s));
     }
+
+  /* MATLAB's subs(f, x, 3), which is what /. does written the other
+   * way round.  With one rule, or a list of them, it is ReplaceAll. */
+  if (name_is (name, "subs", NULL) && args->len == 3 &&
+      ARG (1)->kind == M42_VALUE_EXPR && ARG (1)->u.expr->kind == M42_NODE_IDENT)
+    {
+      g_autoptr (M42Node) into = value_to_node (ARG (0));
+      g_autoptr (M42Node) what = value_to_node (ARG (2));
+      g_autoptr (M42Node) put = NULL;
+
+      if (into == NULL || what == NULL)
+        return m42_value_error ("subs wants an expression, a letter and what to put in");
+      put = m42_node_substitute (into, ARG (1)->u.expr->name, what);
+      if (put == NULL)
+        return m42_value_error ("subs: nothing came of it");
+      return eval (s, put);
+    }
+  if (name_is (name, "subs", NULL) && args->len == 2)
+    return replace_by_rules (s, ARG (0), ARG (1), 1);
 
   if ((name_is (name, "ReplaceAll", NULL) || name_is (name, "ReplaceRepeated", NULL)) &&
       args->len == 2)

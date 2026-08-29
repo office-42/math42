@@ -175,6 +175,8 @@ In[8]:=  Sin[Pi]        Out[8]=  0
 In[9]:=  Sin[Pi/3]      Out[9]=  Sqrt[3]/2
 In[10]:= Sqrt[8]        Out[10]= 2 Sqrt[2]
 In[11]:= Log[E]         Out[11]= 1
+In[11b]:= ArcSin[1/2]   Out[11b]= Pi/6
+In[11c]:= ArcTan[1]     Out[11c]= Pi/4
 ```
 
 The **lower-case MATLAB spellings** always hand back a decimal, which
@@ -610,6 +612,7 @@ In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + 1/2 u^2 + 1/6 u^3 + 1/24
 | `TrigToExp[e]`, `ExpToTrig[e]` | waves as exponentials of an imaginary angle, and back |
 | `PowerExpand[e]` | `Log[a b]` as `Log[a] + Log[b]`, taking the letters for positive numbers |
 | `Solve[lhs == rhs, x]` | every root of a polynomial, complex ones included |
+| `Solve[Sin[x] == 1/2, x]` | a function of the unknown that has an inverse is turned round instead of scanned: `{{x -> Pi/6}, {x -> 5 Pi/6}}`. The waves repeat for ever, and these are the two the principal inverse gives; the rest are these plus whole turns |
 | `Roots[lhs == rhs, x]` | the same, written `x == a || x == b` |
 | `Variables[e]` | the letters in an expression |
 | `PolynomialQ[e, x]` | whether it is a polynomial in x |
@@ -1092,7 +1095,10 @@ What is there:
   `kron`, `nnz`, `prod`, `polyval`, `polyfit`, `roots`, `conv`,
   `interp1`, `fzero`, `fminbnd`, `quad`, `ode45`, `rand`, `randi`,
   `randn`, `hypot`, `nthroot`, `deg2rad`, `rad2deg`, `primes`,
-  `strjoin`, `strtrim`, `contains`, `dec2base`, `base2dec`.
+  `strjoin`, `strtrim`, `contains`, `dec2base`, `base2dec`, `subs`,
+  `squeeze`, `vertcat`, `horzcat`, `cat`, `cellfun`, `histcounts`,
+  `chol`, `sqrtm`, `linsolve`, `regexprep`, `erf`, `erfc`, `erfinv`,
+  `gammaln`, `zeta`, `besselj`, `log2`, `log10`, `sec`, `csc`, `cot`.
 - `plot`, `bar`, `hist`, `scatter`, `surf`, `fplot`, `polarplot`,
   `contour`, `semilogy`, `loglog`, `stem`, `stairs`.
 - `v(2) = 9` to change one place, growing the list with zeros when the
@@ -1128,8 +1134,9 @@ Said plainly, so nothing surprises you:
   also MATLAB's or, and means one shape or the other only where a
   pattern is what was wanted.
 - **Symbolic solving.** `Solve` gives a closed form for a line and a
-  quadratic with letters for coefficients, and finds the rest of the
-  roots numerically — a cubic with letters in it is beyond it. `DSolve`
+  quadratic with letters for coefficients, turns round a function of
+  the unknown that has an inverse, and finds the rest of the roots
+  numerically — a cubic with letters in it is beyond it. `DSolve`
   handles the linear equations: a first order one by its integrating
   factor whatever its coefficients are, a second order one with
   constant coefficients and anything on the right it can integrate

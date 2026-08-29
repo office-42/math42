@@ -73,7 +73,7 @@ gives the Taylor polynomial, `Limit[Sin[x]/x, x -> 0]` is 1,
 `Simplify` folds constants and drops the identities,
 `TrigReduce` writes a product of waves as a sum of waves and
 `TrigExpand` writes it back, `Minimize[x^2 - x, x]` is
-`{-1/4, {x -> 1/2}}`, and `expr /. x -> 2` puts numbers in.
+`{-1/4, {x -> 1/2}}`, and `expr /. x -> 2` (MATLAB's `subs`) puts numbers in.
 
 **Patterns.** A pattern is an expression with holes in it: `x_` stands
 for anything, `x_Integer` for anything with that head, `x__` for one
