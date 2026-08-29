@@ -50,6 +50,24 @@ Instructions for AI agents:
   `.wl` and Mathematica `.nb` files. A round trip must come back
   unchanged: `math42 --convert out.nb a.m42 && math42 --convert
   back.m42 out.nb && diff a.m42 back.m42`.
+- There are no tests, so the way to find a wrong answer is to ask the
+  program something it can check for itself, in bulk. Two sweeps have
+  each caught a real one:
+
+  - **Simplify must not change what an expression is worth**, and the
+    derivative of an integral must be the integrand again. Generate a
+    few hundred ordinary expressions and ask for
+    `Abs[N[(Simplify[e] - (e)) /. x -> 0.37]]` and
+    `Abs[N[(D[Integrate[e, x], x] - (e)) /. x -> 0.37]]`; every answer
+    must be nothing. This is what found `Simplify[x/8]` answering
+    `Infinity`.
+  - **Anything with its own way of being checked**: a root put back in
+    its equation, `Inverse[A] . A - IdentityMatrix`, an eigenvector
+    against its eigenvalue, a transform taken there and back, a series
+    against the function it came from, and `N[exact] - N[decimal]`.
+
+  Put a wrong check in on purpose first and watch it fail, or the sweep
+  is only telling you what you want to hear.
 - To look at a change without a person at the keyboard:
   `math42 --size 800x900 --screenshot out.png notebook.m42`, adding
   `--activate reference` to picture a dialog, and
