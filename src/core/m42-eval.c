@@ -8037,6 +8037,17 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
    * sum(v, 2) is the total of it.  Without this the dimension fell
    * through to the fold below and was added as though it were another
    * number, so sum({1, 2, 3}, 2) came back 8. */
+  /* One number is one number along any dimension there is.  Only sum,
+   * prod and mean read the second argument as a dimension: MATLAB's
+   * max(a, b) is the larger of the two and its dimension form is
+   * written max(A, [], dim), so max(2, 5) must stay 5. */
+  if (args->len == 2 && is_num (ARG (1)) && is_numeric (ARG (0)) &&
+      (name_is (name, "sum", NULL) || name_is (name, "prod", NULL) ||
+       name_is (name, "mean", NULL)))
+    return ARG (1)->u.number >= 1
+             ? m42_value_ref (ARG (0))
+             : m42_value_error ("%s: the dimension must be 1 or 2", name);
+
   if (args->len == 2 && is_num (ARG (1)) && m42_value_is_vector (ARG (0)) &&
       (name_is (name, "sum", NULL) || name_is (name, "mean", NULL) ||
        name_is (name, "max", NULL) || name_is (name, "min", NULL) ||

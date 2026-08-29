@@ -29,6 +29,14 @@ Layout:
   for m in re.finditer(r'name_is \(name, "([^"]+)", (?:"([^"]+)"|NULL)\)', ev):
       names.add(m.group(1))
       if m.group(2): names.add(m.group(2))
+  # And the ones that are not called for by name at all but sit in a
+  # table of their own: UNARY_FUNCS, the Bessel functions, the
+  # orthogonal polynomials.  Looking only for name_is missed twenty of
+  # them, and erf(1) was answering erf and sec(0) answering 0 the whole
+  # while.
+  for m in re.finditer(r'\{\s*"([A-Za-z][A-Za-z0-9]*)"\s*,\s*(?:"([A-Za-z][A-Za-z0-9]*)"|NULL)', ev):
+      names.add(m.group(1))
+      if m.group(2): names.add(m.group(2))
   have = set()
   for a, b in re.findall(r'\{ "([^"]+)", (?:"([^"]+)"|NULL)', hp):
       have.add(a)
@@ -36,6 +44,12 @@ Layout:
   print(sorted(n for n in names if n not in have))
   EOF
   ```
+
+  The second sweep turns up a handful of names that are not functions
+  -- `x`, `y`, `Pi`, `E`, a canonical spelling repeated -- so read the
+  list rather than adding everything in it. The test that settles it is
+  to call the name the MATLAB way with one argument: if `erf(1)` comes
+  back as `erf`, the row is missing.
 
   New rows go above the `{ NULL, NULL, NULL, NULL, NULL }` that ends the
   array, not below it.

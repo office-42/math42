@@ -824,8 +824,18 @@ list is a MATLAB matrix and the two spellings collide.
 `N`, `Rationalize`, `Numerator`, `Denominator`, `Abs`, `Sign`,
 `Round` (also `Round[x, dx]`), `Floor`, `Ceiling`, `IntegerPart`/`fix`,
 `FractionalPart`, `Mod`, `rem`, `Quotient`, `GCD`, `LCM`, `Binomial`,
-`Factorial` (also `n!`), `Gamma`, `PrimeQ`, `Prime`, `Fibonacci`,
-`RandomReal`/`rand`, `RandomInteger`/`randi`, `randn`, `Chop`.
+`Factorial` (also `n!`), `Gamma`, `LogGamma`/`gammaln`, `PrimeQ`,
+`Prime`, `Fibonacci`, `RandomReal`/`rand`, `RandomInteger`/`randi`,
+`randn`, `Chop`.
+
+The functions of one number are `Sin`, `Cos`, `Tan`, `Cot`, `Sec`,
+`Csc`, `ArcSin`, `ArcCos`, `ArcTan`, `Sinh`, `Cosh`, `Tanh`, `Exp`,
+`Log`, `Log10`, `Log2`, `Sqrt` and `Abs`, each of them under its MATLAB
+spelling too, and the ones a physics course wants: `Erf`, `Erfc`,
+`InverseErf`/`erfinv`, `InverseErfc`/`erfcinv`, `Zeta`. With an order
+and an argument there are `BesselJ`, `BesselY`, `BesselI`, `BesselK`
+(all four under `besselj` and its kin), and the orthogonal polynomials
+`LegendreP`, `ChebyshevT`, `ChebyshevU`, `HermiteH`, `LaguerreL`.
 
 ### Discrete mathematics
 
