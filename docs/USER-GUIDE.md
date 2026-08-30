@@ -485,6 +485,7 @@ spelling. Where two names are given, either will do.
 | `Series[f, {x, a, n}]` | the Taylor polynomial |
 | `NDSolve[f, {x, a, b}, y0]`, `ode45` | solves y′ = f(x, y) by Runge–Kutta |
 | `DSolve[eqn, y, x]` | the linear equations, exactly: a first order one by its integrating factor, a second order one with constant coefficients by variation of parameters |
+| `DSolve[{x' == a x + b y, y' == c x + d y}, {x, y}, t]` | a system of two, by the eigenvalues of its matrix: two real rates give exponentials, a turning pair gives a wave inside one, and a repeated rate gives the extra `t`. Starting values may follow the equations, as `x[0] == 1, y[0] == 0` |
 | `RSolve[eqn, a, n]` | a linear recurrence, in closed form |
 
 The integration rules are the ones a first course teaches:
@@ -625,6 +626,8 @@ In[v2]:= DSolve[y'' + 4 y == Sin[x], y, x]
 Out[v2]= C1 Cos[2 x] + C2 Sin[2 x] + Sin[x]/3
 In[v3]:= DSolve[y'' + 2 y' + y == Exp[-x], y, x]
 Out[v3]= C1 Exp[-x] + C2 x Exp[-x] + Exp[-x] x^2/2
+In[v4]:= DSolve[{x' == -y, y' == x, x[0] == 1, y[0] == 0}, {x, y}, t]
+Out[v4]= {x -> Cos[t], y -> Sin[t]}
 ```
 
 The second of those comes back from the integrals as four products of
@@ -1212,9 +1215,11 @@ Said plainly, so nothing surprises you:
   linear equations: a first order one by its integrating factor
   whatever its coefficients are, a second order one with constant
   coefficients and anything on the right it can integrate twice, and a
-  first order one that separates into a power of `y`. `RSolve` handles
+  first order one that separates into a power of `y`, and a system of
+  two first order ones with numbers for coefficients. `RSolve` handles
   a linear recurrence with constant coefficients. There are no partial
-  differential equations.
+  differential equations, and a system of more than two, or one whose
+  coefficients are letters, is beyond it.
 - **Symbolic integration beyond the rules listed above.** The special
   functions that are there — `Gamma`, `Beta`, `Erf`, `Erfc`, `Zeta`,
   `BesselJ`, `BesselY`, `LegendreP`, `HermiteH` — are numeric, and

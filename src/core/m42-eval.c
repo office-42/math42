@@ -4264,6 +4264,43 @@ mark_derivatives (const M42Node *n, const char *unknown)
   return out;
 }
 
+/* The same for a system, where there are two unknowns and each wants
+ * names of its own: the letter itself becomes zero_name and its
+ * derivative one_name.  NULL when a second derivative turns up, since
+ * a system of the first order is all this solves. */
+static M42Node *
+mark_named_derivatives (const M42Node *n, const char *unknown,
+                        const char *zero_name, const char *one_name)
+{
+  int primes = prime_count (n, unknown);
+  M42Node *out;
+
+  if (primes == 0)
+    return m42_node_ident (zero_name);
+  if (primes == 1)
+    return m42_node_ident (one_name);
+  if (primes > 1)
+    return NULL;
+
+  out = m42_node_new (n->kind);
+  out->op = n->op;
+  out->number = n->number;
+  out->name = g_strdup (n->name);
+  for (guint i = 0; i < n->children->len; i++)
+    {
+      M42Node *child = mark_named_derivatives (m42_node_child (n, i), unknown,
+                                               zero_name, one_name);
+
+      if (child == NULL)
+        {
+          m42_node_free (out);
+          return NULL;
+        }
+      g_ptr_array_add (out->children, child);
+    }
+  return out;
+}
+
 /* The number in front of one of those names, which must be a constant
  * for the solver to know what to do with it. */
 static gboolean
@@ -5559,6 +5596,498 @@ assemble_solution (const Solution *sol, const double *constants)
   return out != NULL ? out : m42_node_number (0);
 }
 
+/* --- a system of two differential equations -----------------------------
+ *
+ * x' = a x + b y + p
+ * y' = c x + d y + q
+ *
+ * with numbers for a, b, c, d and constants for p and q.  The way of
+ * it is the way a course teaches: the eigenvalues of the matrix say
+ * how the solution grows, and the eigenvectors say in which direction.
+ *
+ *   two real roots     C1 v1 Exp[L1 t] + C2 v2 Exp[L2 t]
+ *   a complex pair     Exp[a t] (C1 (u Cos[b t] - w Sin[b t]) + ...)
+ *   a repeated root    (C1 + C2 t) v + C2 w, w the generalised vector
+ *
+ * and a constant on the right adds the steady point A^-1 (-p, -q),
+ * where there is one.  Mathematica answers with rules for x[t] and
+ * y[t]; math42 answers with rules for x and y, since that is how its
+ * own DSolve answers already.
+ */
+
+/* One term of an answer: a number times an expression, left out when
+ * the number is nothing and bare when it is one. */
+static M42Node *
+scaled (double k, M42Node *what)
+{
+  if (fabs (k) < 1e-14)
+    {
+      m42_node_free (what);
+      return NULL;
+    }
+  if (fabs (k - 1) < 1e-14)
+    return what;
+  if (fabs (k + 1) < 1e-14)
+    return m42_node_unary (M42_TOK_MINUS, what);
+  return m42_node_binary (M42_TOK_STAR, coefficient_node (k), what);
+}
+
+static M42Node *
+added (M42Node *a, M42Node *b)
+{
+  if (a == NULL)
+    return b;
+  if (b == NULL)
+    return a;
+  return m42_node_binary (M42_TOK_PLUS, a, b);
+}
+
+/* Exp[k t], written plainly when k is 1 and dropped when it is 0. */
+static M42Node *
+growth (double k, const char *var)
+{
+  if (fabs (k) < 1e-14)
+    return m42_node_number (1);
+  if (fabs (k - 1) < 1e-14)
+    return m42_node_call1 ("Exp", m42_node_ident (var));
+  return m42_node_call1 ("Exp", m42_node_binary (M42_TOK_STAR, coefficient_node (k),
+                                                 m42_node_ident (var)));
+}
+
+/* Cos[k t] or Sin[k t] with the same care. */
+static M42Node *
+wave (const char *which, double k, const char *var)
+{
+  M42Node *inside = fabs (k - 1) < 1e-14
+                      ? m42_node_ident (var)
+                      : m42_node_binary (M42_TOK_STAR, coefficient_node (k),
+                                         m42_node_ident (var));
+
+  return m42_node_call1 (which, inside);
+}
+
+/* x' = a x + b y + p, y' = c x + d y + q: the two answers, or FALSE
+ * when the equations are not of that shape. */
+static gboolean
+solve_linear_system (M42Session *s, double a, double b, double c, double d,
+                     double p, double q, const char *var, M42Node *out[2])
+{
+  double trace = a + d, det = a * d - b * c;
+  double disc = trace * trace - 4 * det;
+  double steady[2] = { 0, 0 };
+  gboolean has_steady = FALSE;
+
+  out[0] = out[1] = NULL;
+
+  /* A constant on the right is met by a steady point, where the
+   * matrix can be turned round. */
+  if (fabs (p) > 1e-14 || fabs (q) > 1e-14)
+    {
+      if (fabs (det) < 1e-12)
+        return FALSE;
+      steady[0] = (-p * d + q * b) / det;
+      steady[1] = (-q * a + p * c) / det;
+      has_steady = TRUE;
+    }
+
+  if (disc > 1e-12)
+    {
+      /* Two directions, each with its own rate. */
+      double root = sqrt (disc);
+      double lambda[2] = { (trace + root) / 2, (trace - root) / 2 };
+
+      for (int k = 0; k < 2; k++)
+        {
+          double vx, vy;
+          const char *constant = k == 0 ? "C1" : "C2";
+
+          if (fabs (b) > 1e-12)
+            {
+              vx = b;
+              vy = lambda[k] - a;
+            }
+          else if (fabs (c) > 1e-12)
+            {
+              vx = lambda[k] - d;
+              vy = c;
+            }
+          else
+            {
+              /* Already apart: each letter goes its own way. */
+              vx = k == 0 ? 1 : 0;
+              vy = k == 0 ? 0 : 1;
+              lambda[k] = k == 0 ? a : d;
+            }
+          {
+            M42Node *e = growth (lambda[k], var);
+            M42Node *with = m42_node_binary (M42_TOK_STAR, m42_node_ident (constant), e);
+
+            out[0] = added (out[0], scaled (vx, m42_node_copy (with)));
+            out[1] = added (out[1], scaled (vy, with));
+          }
+        }
+    }
+  else if (disc < -1e-12)
+    {
+      /* A pair that turns: the real and imaginary halves of one
+       * eigenvector give the two directions, and the answer is a wave
+       * inside an exponential. */
+      double alpha = trace / 2, beta = sqrt (-disc) / 2;
+      double ux, uy, wx, wy;
+
+      if (fabs (b) > 1e-12)
+        {
+          ux = b;  uy = alpha - a;
+          wx = 0;  wy = beta;
+        }
+      else if (fabs (c) > 1e-12)
+        {
+          ux = alpha - d; uy = c;
+          wx = beta;      wy = 0;
+        }
+      else
+        return FALSE;
+
+      for (int k = 0; k < 2; k++)
+        {
+          const char *constant = k == 0 ? "C1" : "C2";
+          M42Node *cosine = wave ("Cos", beta, var);
+          M42Node *sine = wave ("Sin", beta, var);
+          /* C1 (u Cos - w Sin) + C2 (u Sin + w Cos) */
+          M42Node *px = added (scaled (ux, k == 0 ? m42_node_copy (cosine)
+                                                  : m42_node_copy (sine)),
+                               scaled (k == 0 ? -wx : wx,
+                                       k == 0 ? m42_node_copy (sine)
+                                              : m42_node_copy (cosine)));
+          M42Node *py = added (scaled (uy, k == 0 ? m42_node_copy (cosine)
+                                                  : m42_node_copy (sine)),
+                               scaled (k == 0 ? -wy : wy,
+                                       k == 0 ? m42_node_copy (sine)
+                                              : m42_node_copy (cosine)));
+
+          m42_node_free (cosine);
+          m42_node_free (sine);
+          if (px != NULL)
+            out[0] = added (out[0],
+                            m42_node_binary (M42_TOK_STAR,
+                                             m42_node_binary (M42_TOK_STAR,
+                                                              m42_node_ident (constant),
+                                                              growth (alpha, var)),
+                                             px));
+          if (py != NULL)
+            out[1] = added (out[1],
+                            m42_node_binary (M42_TOK_STAR,
+                                             m42_node_binary (M42_TOK_STAR,
+                                                              m42_node_ident (constant),
+                                                              growth (alpha, var)),
+                                             py));
+        }
+    }
+  else
+    {
+      /* One rate twice over.  When the matrix is already a multiple of
+       * the identity every direction is an eigenvector; otherwise
+       * there is one, and a generalised one beside it. */
+      double lambda = trace / 2;
+
+      if (fabs (b) < 1e-12 && fabs (c) < 1e-12 && fabs (a - d) < 1e-12)
+        {
+          out[0] = m42_node_binary (M42_TOK_STAR, m42_node_ident ("C1"),
+                                    growth (lambda, var));
+          out[1] = m42_node_binary (M42_TOK_STAR, m42_node_ident ("C2"),
+                                    growth (lambda, var));
+        }
+      else
+        {
+          double vx, vy, wx, wy;
+
+          if (fabs (b) > 1e-12)
+            {
+              vx = b;         vy = lambda - a;
+              /* (A - L) w = v, one answer of which is: */
+              wx = 0;         wy = 1;
+              /* b wy = vx  ->  wy = vx / b */
+              wy = vx / b;
+              wx = 0;
+            }
+          else
+            {
+              vx = lambda - d; vy = c;
+              wx = vy / c;     wy = 0;
+            }
+          {
+            M42Node *e = growth (lambda, var);
+            M42Node *t_e = m42_node_binary (M42_TOK_STAR, m42_node_ident (var),
+                                            m42_node_copy (e));
+            /* C1 v e + C2 (v t e + w e) */
+            M42Node *first_x = scaled (vx, m42_node_binary (M42_TOK_STAR,
+                                                            m42_node_ident ("C1"),
+                                                            m42_node_copy (e)));
+            M42Node *first_y = scaled (vy, m42_node_binary (M42_TOK_STAR,
+                                                            m42_node_ident ("C1"),
+                                                            m42_node_copy (e)));
+            M42Node *second_x =
+              added (scaled (vx, m42_node_binary (M42_TOK_STAR, m42_node_ident ("C2"),
+                                                  m42_node_copy (t_e))),
+                     scaled (wx, m42_node_binary (M42_TOK_STAR, m42_node_ident ("C2"),
+                                                  m42_node_copy (e))));
+            M42Node *second_y =
+              added (scaled (vy, m42_node_binary (M42_TOK_STAR, m42_node_ident ("C2"),
+                                                  m42_node_copy (t_e))),
+                     scaled (wy, m42_node_binary (M42_TOK_STAR, m42_node_ident ("C2"),
+                                                  m42_node_copy (e))));
+
+            m42_node_free (e);
+            m42_node_free (t_e);
+            out[0] = added (first_x, second_x);
+            out[1] = added (first_y, second_y);
+          }
+        }
+    }
+
+  if (has_steady)
+    {
+      out[0] = added (out[0], scaled (steady[0], m42_node_number (1)));
+      out[1] = added (out[1], scaled (steady[1], m42_node_number (1)));
+    }
+  for (int k = 0; k < 2; k++)
+    {
+      M42Node *tidy;
+
+      if (out[k] == NULL)
+        out[k] = m42_node_number (0);
+      tidy = simplify_hard (s, out[k]);
+      if (tidy != NULL)
+        {
+          m42_node_free (out[k]);
+          out[k] = tidy;
+        }
+    }
+  return TRUE;
+}
+
+/* The answer with numbers put in for the two constants, at a place. */
+static double
+system_at (M42Session *s, const M42Node *answer, const char *var, double where,
+           double c1, double c2)
+{
+  g_autoptr (M42Node) first = NULL;
+  g_autoptr (M42Node) second = NULL;
+  g_autoptr (M42Node) one = m42_node_number (c1);
+  g_autoptr (M42Node) two = m42_node_number (c2);
+
+  first = m42_node_substitute (answer, "C1", one);
+  if (first == NULL)
+    return NAN;
+  second = m42_node_substitute (first, "C2", two);
+  if (second == NULL)
+    return NAN;
+  return number_at (s, second, var, where);
+}
+
+/* x[0] == 1 and y[0] == 0 and their like: the two constants are found
+ * by asking what the answer is worth at that place for C1 and C2 of 0
+ * and 1, since the answer is a line in both of them. */
+static gboolean
+fit_two_constants (M42Session *s, M42Node *answers[2], const char *names[2],
+                   const char *var, GPtrArray *conditions)
+{
+  double rows[2][2], wants[2];
+  double c1, c2, det;
+
+  if (conditions->len != 2)
+    return FALSE;
+  for (guint i = 0; i < 2; i++)
+    {
+      const M42Node *cond = g_ptr_array_index (conditions, i);
+      const M42Node *left;
+      double at, want;
+      int which = -1;
+
+      if (cond->kind != M42_NODE_BINARY || cond->op != M42_TOK_EQ)
+        return FALSE;
+      left = m42_node_child (cond, 0);
+      if (left->kind != M42_NODE_CALL || left->children->len != 1)
+        return FALSE;
+      for (int k = 0; k < 2; k++)
+        if (strcmp (left->name, names[k]) == 0)
+          which = k;
+      if (which < 0 || !constant_fold (m42_node_child (left, 0), &at) ||
+          !constant_fold (m42_node_child (cond, 1), &want))
+        return FALSE;
+      {
+        double none = system_at (s, answers[which], var, at, 0, 0);
+        double with_first = system_at (s, answers[which], var, at, 1, 0);
+        double with_second = system_at (s, answers[which], var, at, 0, 1);
+
+        if (!isfinite (none) || !isfinite (with_first) || !isfinite (with_second))
+          return FALSE;
+        rows[i][0] = with_first - none;
+        rows[i][1] = with_second - none;
+        wants[i] = want - none;
+      }
+    }
+
+  det = rows[0][0] * rows[1][1] - rows[0][1] * rows[1][0];
+  if (fabs (det) < 1e-12)
+    return FALSE;
+  c1 = (wants[0] * rows[1][1] - wants[1] * rows[0][1]) / det;
+  c2 = (rows[0][0] * wants[1] - rows[1][0] * wants[0]) / det;
+
+  for (int k = 0; k < 2; k++)
+    {
+      g_autoptr (M42Node) one = coefficient_node (c1);
+      g_autoptr (M42Node) two = coefficient_node (c2);
+      M42Node *first = m42_node_substitute (answers[k], "C1", one);
+      M42Node *second = first != NULL ? m42_node_substitute (first, "C2", two) : NULL;
+
+      m42_node_free (first);
+      if (second == NULL)
+        return FALSE;
+      m42_node_free (answers[k]);
+      answers[k] = simplify_hard (s, second);
+      m42_node_free (second);
+      if (answers[k] == NULL)
+        return FALSE;
+    }
+  return TRUE;
+}
+
+/* DSolve[{x' == ..., y' == ...}, {x, y}, t] */
+static M42Value *
+dsolve_system (M42Session *s, const M42Node *eqns, const M42Node *unknowns,
+               const char *var)
+{
+  const char *names[2];
+  double m[2][2], rest[2];
+  M42Node *answers[2];
+  g_autoptr (GPtrArray) conditions = g_ptr_array_new ();
+
+  /* Anything after the two equations is a starting value. */
+  for (guint i = 2; i < eqns->children->len; i++)
+    g_ptr_array_add (conditions, (gpointer) m42_node_child (eqns, i));
+
+  if (eqns->children->len < 2 || unknowns->children->len != 2)
+    return m42_value_error ("DSolve: math42 solves a system of two equations in two "
+                            "unknowns, and that is not one");
+  for (int i = 0; i < 2; i++)
+    {
+      if (m42_node_child (unknowns, i)->kind != M42_NODE_IDENT)
+        return m42_value_error ("DSolve: the unknowns have to be names");
+      names[i] = m42_node_child (unknowns, i)->name;
+    }
+
+  for (int i = 0; i < 2; i++)
+    {
+      const M42Node *eq = m42_node_child (eqns, i);
+      g_autoptr (M42Node) whole = NULL;
+      g_autoptr (M42Node) marked = NULL;
+      double slope;
+
+      if (eq->kind != M42_NODE_BINARY || eq->op != M42_TOK_EQ)
+        return m42_value_error ("DSolve: each of them has to be an equation");
+      whole = m42_node_binary (M42_TOK_MINUS,
+                               m42_node_copy (m42_node_child (eq, 0)),
+                               m42_node_copy (m42_node_child (eq, 1)));
+
+      /* Every unknown and its derivative given a name of its own:
+       * $x0 and $x1 for the first, $y0 and $y1 for the second. */
+      marked = m42_node_copy (whole);
+      for (int k = 0; k < 2; k++)
+        {
+          g_autofree char *zero = g_strdup_printf ("$%c0", 'a' + k);
+          g_autofree char *one = g_strdup_printf ("$%c1", 'a' + k);
+          M42Node *step = mark_named_derivatives (marked, names[k], zero, one);
+
+          if (step == NULL)
+            return m42_value_error ("DSolve: those are not equations of the first "
+                                    "order in both unknowns");
+          g_clear_pointer (&marked, m42_node_free);
+          marked = step;
+        }
+
+      /* It has to be one derivative and no more. */
+      {
+        g_autofree char *mine = g_strdup_printf ("$%c1", 'a' + i);
+        g_autofree char *other = g_strdup_printf ("$%c1", 'a' + (1 - i));
+
+        if (!coefficient_of (marked, mine, &slope) || fabs (slope) < 1e-12 ||
+            m42_node_depends_on (marked, other))
+          return m42_value_error ("DSolve: each equation must give the derivative of "
+                                  "one unknown in terms of the two of them");
+      }
+
+      /* The coefficients, read off by differentiating. */
+      for (int k = 0; k < 2; k++)
+        {
+          g_autofree char *name = g_strdup_printf ("$%c0", 'a' + k);
+          double coefficient;
+
+          if (!coefficient_of (marked, name, &coefficient))
+            return m42_value_error ("DSolve: the coefficients of a system have to be "
+                                    "numbers");
+          m[i][k] = -coefficient / slope;
+        }
+      /* And what is left when every unknown is nothing. */
+      {
+        g_autoptr (M42Node) put = m42_node_copy (marked);
+
+        for (int k = 0; k < 2; k++)
+          {
+            g_autofree char *zero_name = g_strdup_printf ("$%c0", 'a' + k);
+            g_autofree char *one_name = g_strdup_printf ("$%c1", 'a' + k);
+            g_autoptr (M42Node) nothing = m42_node_number (0);
+            M42Node *step = m42_node_substitute (put, zero_name, nothing);
+            M42Node *again;
+
+            if (step == NULL)
+              return m42_value_error ("DSolve: that system is beyond math42");
+            again = m42_node_substitute (step, one_name, nothing);
+            m42_node_free (step);
+            if (again == NULL)
+              return m42_value_error ("DSolve: that system is beyond math42");
+            g_clear_pointer (&put, m42_node_free);
+            put = again;
+          }
+        {
+          g_autoptr (M42Node) tidy = m42_node_simplify (put);
+          double left;
+
+          if (tidy == NULL || !constant_fold (tidy, &left))
+            return m42_value_error ("DSolve: only a constant may stand on the right "
+                                    "of a system");
+          rest[i] = -left / slope;
+        }
+      }
+    }
+
+  if (!solve_linear_system (s, m[0][0], m[0][1], m[1][0], m[1][1],
+                            rest[0], rest[1], var, answers))
+    return m42_value_error ("DSolve: that system has no steady point, and math42 "
+                            "cannot solve it");
+  if (conditions->len > 0 &&
+      !fit_two_constants (s, answers, names, var, conditions))
+    {
+      for (int i = 0; i < 2; i++)
+        m42_node_free (answers[i]);
+      return m42_value_error ("DSolve: a system wants one starting value for each "
+                              "unknown, as x[0] == 1 and y[0] == 0");
+    }
+  {
+    M42Value *out = m42_value_list_new ();
+
+    for (int i = 0; i < 2; i++)
+      {
+        M42Node *rule = m42_node_new (M42_NODE_RULE);
+
+        g_ptr_array_add (rule->children, m42_node_ident (names[i]));
+        g_ptr_array_add (rule->children, answers[i]);
+        m42_value_list_append (out, m42_value_expr (rule));
+      }
+    return out;
+  }
+}
+
 static M42Value *
 dsolve (M42Session *s, const M42Node *call)
 {
@@ -5576,6 +6105,11 @@ dsolve (M42Session *s, const M42Node *call)
   eqns = m42_node_child (call, 0);
   unknown_node = m42_node_child (call, 1);
   var_node = m42_node_child (call, 2);
+  /* A list of equations and a list of unknowns is a system. */
+  if (eqns->kind == M42_NODE_LIST && unknown_node->kind == M42_NODE_LIST &&
+      var_node->kind == M42_NODE_IDENT)
+    return dsolve_system (s, eqns, unknown_node, var_node->name);
+
   if (unknown_node->kind != M42_NODE_IDENT || var_node->kind != M42_NODE_IDENT)
     return m42_value_error ("DSolve expects names for the unknown and the variable");
   unknown = unknown_node->name;

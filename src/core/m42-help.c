@@ -16,7 +16,7 @@ static const M42Function FUNCTIONS[] = {
   { "Limit", NULL, "Limit[f, x -> a]", "the value f closes in on at a, or at Infinity", "Calculus" },
   { "Series", "Taylor", "Series[f, {x, a, n}]", "the Taylor polynomial of f about a, to order n", "Calculus" },
   { "NDSolve", "ode45", "NDSolve[f, {x, a, b}, y0]", "solves y' = f(x, y) by Runge-Kutta and returns the points", "Calculus" },
-  { "DSolve", "dsolve", "DSolve[a y'' + b y' + c y == f, y, x]", "the general solution, or the one that fits y[0] == 1 and y'[0] == 0; f may be anything of x it can integrate", "Calculus" },
+  { "DSolve", "dsolve", "DSolve[a y'' + b y' + c y == f, y, x]", "the general solution, or the one that fits y[0] == 1 and y'[0] == 0; f may be anything of x it can integrate; a list of two first-order equations and a list of two unknowns solves a system", "Calculus" },
   { "RSolve", "rsolve", "RSolve[{a[n] == a[n-1] + a[n-2], a[0] == 0, a[1] == 1}, a, n]", "the closed form of a recurrence, by its characteristic roots", "Calculus" },
 
   /* --- several variables -------------------------------------------- */
