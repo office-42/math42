@@ -1246,9 +1246,18 @@ Said plainly, so nothing surprises you:
   What is missing is everything else: an integral outside the rules
   listed above is left standing rather than answered with a function
   nobody has heard of, and there is no Meijer G to fall back on.
-- **Symbolic transforms beyond the table**: the Laplace pair works from
-  the table a course hands out, and the Fourier series is worked out by
-  quadrature rather than symbolically.
+- **Symbolic transforms beyond the rules.** The Laplace transform
+  works from a small table with the rules of the trade on top of it —
+  a constant multiple, a sum, the shift `L[Exp[a t] f] = F(s - a)` and
+  the power `L[t^n f] = (-1)^n F^(n)(s)`, applied together, so that
+  `t^2 Exp[t] Sin[t]` goes through though no table lists it. What is
+  not there is the transform of a derivative of an unknown function,
+  which is what would let `DSolve` be done by transform, and the
+  convolution rule. The Fourier series is worked out symbolically
+  wherever the coefficient integral has a closed form —
+  `FourierSeries[x^2, {x, -Pi, Pi}, 3]` is `Pi^2/3 - 4 Cos[x] +
+  Cos[2 x] - 4 Cos[3 x]/9` — and falls back on quadrature where it has
+  none, as it must for `Abs[x]`.
 - **`function` files**, and a function that returns several things.
   `{a, b} = {1, 2}` and `[q, r] = size(A)` hand out the pieces of one
   list, which is as near as it comes.

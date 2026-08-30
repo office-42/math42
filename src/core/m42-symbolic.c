@@ -274,6 +274,37 @@ m42_node_to_string (GString *out, const M42Node *n)
     }
 }
 
+static gboolean power_number (const M42Node *n, double *out);
+
+/* Every factor of a product, however the multiplications are nested. */
+static void
+product_factors (const M42Node *n, GPtrArray *out)
+{
+  if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_STAR)
+    {
+      product_factors (m42_node_child (n, 0), out);
+      product_factors (m42_node_child (n, 1), out);
+      return;
+    }
+  g_ptr_array_add (out, (gpointer) n);
+}
+
+/* Whether two trees are the same tree, written out.  It is the
+ * simplest honest test there is, and it is what a rule about u^a/u^b
+ * needs in order to know that the two u's are one u. */
+static gboolean
+same_shape (const M42Node *a, const M42Node *b)
+{
+  g_autoptr (GString) left = g_string_new (NULL);
+  g_autoptr (GString) right = g_string_new (NULL);
+
+  if (a == NULL || b == NULL)
+    return a == b;
+  m42_node_to_string (left, a);
+  m42_node_to_string (right, b);
+  return strcmp (left->str, right->str) == 0;
+}
+
 /* --- simplification ---------------------------------------------------- */
 
 static gboolean
@@ -469,6 +500,24 @@ m42_node_simplify (const M42Node *n)
           M42Node *inner = g_ptr_array_steal_index (a->children, 0);
           m42_node_free (a);
           return inner;
+        }
+      /* -((p - q)/c) is (q - p)/c: the minus goes into the fraction and
+       * the difference turns round, which is the shape a derivative of
+       * a quotient leaves behind. */
+      if (a->kind == M42_NODE_BINARY && a->op == M42_TOK_SLASH &&
+          m42_node_child (a, 0)->kind == M42_NODE_BINARY &&
+          m42_node_child (a, 0)->op == M42_TOK_MINUS)
+        {
+          const M42Node *top = m42_node_child (a, 0);
+          M42Node *turned =
+            m42_node_binary (M42_TOK_SLASH,
+                             m42_node_binary (M42_TOK_MINUS,
+                                              m42_node_copy (m42_node_child (top, 1)),
+                                              m42_node_copy (m42_node_child (top, 0))),
+                             m42_node_copy (m42_node_child (a, 1)));
+
+          m42_node_free (a);
+          return turned;
         }
       /* Minus a fraction whose top is a negative number takes the sign
        * into the number: -(-1/u) is 1/u.  Only a number, so that this
@@ -858,6 +907,101 @@ m42_node_simplify (const M42Node *n)
           }
           break;
         case M42_TOK_SLASH:
+          /* A factor standing on both sides of the line comes off
+           * both: 2 Pi x/Pi is 2 x.  The general cancelling works on
+           * polynomials in a variable, and Pi is not one of those. */
+          if (a->kind == M42_NODE_BINARY || b->kind == M42_NODE_BINARY)
+            {
+              g_autoptr (GPtrArray) top = g_ptr_array_new ();
+              g_autoptr (GPtrArray) bottom = g_ptr_array_new ();
+              gboolean cancelled = FALSE;
+
+              product_factors (a, top);
+              product_factors (b, bottom);
+              for (guint i = 0; i < top->len && !cancelled; i++)
+                for (guint k = 0; k < bottom->len && !cancelled; k++)
+                  {
+                    const M42Node *one = g_ptr_array_index (top, i);
+
+                    if (one->kind == M42_NODE_NUMBER ||
+                        !same_shape (one, g_ptr_array_index (bottom, k)))
+                      continue;
+                    g_ptr_array_remove_index (top, i);
+                    g_ptr_array_remove_index (bottom, k);
+                    cancelled = TRUE;
+                  }
+              if (cancelled)
+                {
+                  M42Node *left = NULL, *right = NULL;
+
+                  for (guint i = 0; i < top->len; i++)
+                    left = left == NULL
+                             ? m42_node_copy (g_ptr_array_index (top, i))
+                             : m42_node_binary (M42_TOK_STAR, left,
+                                                m42_node_copy (g_ptr_array_index (top, i)));
+                  for (guint i = 0; i < bottom->len; i++)
+                    right = right == NULL
+                              ? m42_node_copy (g_ptr_array_index (bottom, i))
+                              : m42_node_binary (M42_TOK_STAR, right,
+                                                 m42_node_copy (g_ptr_array_index (bottom, i)));
+                  if (left == NULL)
+                    left = m42_node_number (1);
+                  m42_node_free (a);
+                  m42_node_free (b);
+                  if (right == NULL)
+                    return simplify_and_free (left);
+                  return simplify_and_free (m42_node_binary (M42_TOK_SLASH, left, right));
+                }
+            }
+          /* u^a over u^b is u^(a - b), for whatever u stands for, so
+           * long as both powers are numbers -- and with the numbers in
+           * front of them kept: 2 Pi^3/(6 Pi) is Pi^2/3. */
+          {
+            g_autoptr (M42Node) top = m42_node_copy (a);
+            g_autoptr (M42Node) bottom = m42_node_copy (b);
+            double up_factor = 1, down_factor = 1;
+            M42Node *top_rest = fold_leading_number (g_steal_pointer (&top), &up_factor);
+            M42Node *bottom_rest = fold_leading_number (g_steal_pointer (&bottom),
+                                                        &down_factor);
+            double up = 1, down = 1;
+            gboolean top_power = top_rest != NULL && top_rest->kind == M42_NODE_BINARY &&
+                                 top_rest->op == M42_TOK_CARET;
+            gboolean bottom_power = bottom_rest != NULL &&
+                                    bottom_rest->kind == M42_NODE_BINARY &&
+                                    bottom_rest->op == M42_TOK_CARET;
+            const M42Node *base_a = top_rest == NULL ? NULL
+                                    : top_power ? m42_node_child (top_rest, 0) : top_rest;
+            const M42Node *base_b = bottom_rest == NULL ? NULL
+                                    : bottom_power ? m42_node_child (bottom_rest, 0)
+                                                   : bottom_rest;
+
+            if (base_a != NULL && base_b != NULL &&
+                base_a->kind != M42_NODE_NUMBER && same_shape (base_a, base_b) &&
+                fabs (down_factor) > 1e-14 &&
+                (!top_power || power_number (m42_node_child (top_rest, 1), &up)) &&
+                (!bottom_power || power_number (m42_node_child (bottom_rest, 1), &down)))
+              {
+                M42Node *folded = up == down
+                                    ? m42_node_number (1)
+                                    : m42_node_binary (M42_TOK_CARET,
+                                                       m42_node_copy (base_a),
+                                                       m42_node_number (up - down));
+
+                if (up_factor != down_factor)
+                  folded = m42_node_binary (M42_TOK_STAR,
+                                            m42_node_binary (M42_TOK_SLASH,
+                                                             m42_node_number (up_factor),
+                                                             m42_node_number (down_factor)),
+                                            folded);
+                m42_node_free (top_rest);
+                m42_node_free (bottom_rest);
+                m42_node_free (a);
+                m42_node_free (b);
+                return simplify_and_free (folded);
+              }
+            m42_node_free (top_rest);
+            m42_node_free (bottom_rest);
+          }
           if (is_num (b, 1)) DROP_B ();
           if (is_num (a, 0))
             {
@@ -1099,6 +1243,26 @@ m42_node_simplify (const M42Node *n)
                 raised = m42_node_unary (M42_TOK_MINUS, raised);
               return simplify_and_free (raised);
             }
+          /* (u^a)^b is u^(a b) when both are whole numbers, whatever u
+           * stands for: ((s^2 + 4)^2)^2 is (s^2 + 4)^4. */
+          if (a->kind == M42_NODE_BINARY && a->op == M42_TOK_CARET)
+            {
+              double inner, outer;
+
+              if (power_number (m42_node_child (a, 1), &inner) &&
+                  power_number (b, &outer) &&
+                  inner == floor (inner) && outer == floor (outer))
+                {
+                  M42Node *folded =
+                    m42_node_binary (M42_TOK_CARET,
+                                     m42_node_copy (m42_node_child (a, 0)),
+                                     m42_node_number (inner * outer));
+
+                  m42_node_free (a);
+                  m42_node_free (b);
+                  return simplify_and_free (folded);
+                }
+            }
           /* A square root squared is what was under it. */
           if (is_num (b, 2) && a->kind == M42_NODE_CALL && a->children->len == 1 &&
               (strcmp (a->name, "Sqrt") == 0 || strcmp (a->name, "sqrt") == 0))
@@ -1124,6 +1288,28 @@ m42_node_simplify (const M42Node *n)
   r->name = g_strdup (n->name);
   for (guint i = 0; i < n->children->len; i++)
     g_ptr_array_add (r->children, m42_node_simplify (m42_node_child (n, i)));
+
+  /* Abs of one of the constants everybody knows: they are all above
+   * nothing, so the bars come off.  Abs[-Pi] is Pi. */
+  if (r->kind == M42_NODE_CALL && r->children->len == 1 &&
+      (strcmp (r->name, "Abs") == 0 || strcmp (r->name, "abs") == 0))
+    {
+      static const char *const ABOVE[] = { "Pi", "E", "Degree", "GoldenRatio",
+                                           "EulerGamma", "Infinity" };
+      const M42Node *inside = m42_node_child (r, 0);
+      gboolean minus = inside->kind == M42_NODE_UNARY && inside->op == M42_TOK_MINUS;
+      const M42Node *bare = minus ? m42_node_child (inside, 0) : inside;
+
+      if (bare->kind == M42_NODE_IDENT)
+        for (guint i = 0; i < G_N_ELEMENTS (ABOVE); i++)
+          if (strcmp (bare->name, ABOVE[i]) == 0)
+            {
+              M42Node *plain = m42_node_ident (bare->name);
+
+              m42_node_free (r);
+              return plain;
+            }
+    }
 
   /* Cos[-u] is Cos[u] and Sin[-u] is -Sin[u]: the minus a difference
    * of angles is written with does not belong inside the wave.  It is
@@ -2781,6 +2967,104 @@ integrate_by_pattern (const M42Node *n, const char *var, int depth)
   return NULL;
 }
 
+/* Whether a tree is A x + B with A and B free of x, and what A and B
+ * are -- as trees, so that A may be Pi, or a, or anything at all that
+ * the variable is not in.  linear_coeffs answers the same question in
+ * doubles, which is why Integrate[Sin[a x], x] had no answer: a is not
+ * a double. */
+static gboolean
+linear_in_var (const M42Node *n, const char *var, M42Node **slope, M42Node **shift)
+{
+  g_autoptr (M42Node) d = m42_node_differentiate (n, var);
+  g_autoptr (M42Node) a = NULL;
+  g_autoptr (M42Node) rest = NULL;
+  g_autoptr (M42Node) b = NULL;
+
+  if (d == NULL)
+    return FALSE;
+  a = m42_node_simplify (d);
+  if (a == NULL || m42_node_depends_on (a, var))
+    return FALSE;
+  /* What is left when A x is taken away has to be gathered before it
+   * can be seen to be free of x: a x + b - a x is not obviously b
+   * until the like terms are put together. */
+  {
+    g_autoptr (M42Node) raw = SUB (CP (n), MUL (CP (a), m42_node_ident (var)));
+
+    rest = m42_node_expand (raw);
+  }
+  b = rest != NULL ? m42_node_simplify (rest) : NULL;
+  if (b == NULL || m42_node_depends_on (b, var))
+    return FALSE;
+  *slope = g_steal_pointer (&a);
+  *shift = g_steal_pointer (&b);
+  return TRUE;
+}
+
+/* f(A x + B) dx, when f alone can be integrated: the answer is
+ * F(A x + B)/A, which is the substitution u = A x + B done once and
+ * for all rather than function by function. */
+static M42Node *
+integrate_inside_linear (const M42Node *n, const char *var, int depth)
+{
+  g_autoptr (M42Node) slope = NULL;
+  g_autoptr (M42Node) shift = NULL;
+  g_autoptr (M42Node) bare = NULL;
+  g_autoptr (M42Node) inner = NULL;
+  const M42Node *inside;
+
+  if (depth > 6)
+    return NULL;
+  if (n->kind == M42_NODE_CALL && n->children->len == 1)
+    inside = m42_node_child (n, 0);
+  else if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_CARET &&
+           !m42_node_depends_on (m42_node_child (n, 1), var))
+    inside = m42_node_child (n, 0);
+  else if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_SLASH &&
+           !m42_node_depends_on (m42_node_child (n, 0), var))
+    {
+      /* c/(A x + B) is c Log[Abs[A x + B]]/A. */
+      g_autoptr (M42Node) a = NULL;
+      g_autoptr (M42Node) b = NULL;
+      const M42Node *bottom = m42_node_child (n, 1);
+
+      if (!m42_node_depends_on (bottom, var) ||
+          !linear_in_var (bottom, var, &a, &b) || a->kind == M42_NODE_NUMBER)
+        return NULL;
+      return DIV (MUL (CP (m42_node_child (n, 0)),
+                       CALL ("Log", CALL ("Abs", CP (bottom)))),
+                  CP (a));
+    }
+  else
+    return NULL;
+
+  if (inside->kind == M42_NODE_IDENT && strcmp (inside->name, var) == 0)
+    return NULL;                    /* f(x) itself: the ordinary rules have it */
+  if (!m42_node_depends_on (inside, var))
+    return NULL;
+  if (!linear_in_var (inside, var, &slope, &shift))
+    return NULL;
+  /* A slope that is a number is what the ordinary rules already
+   * handle, and doing it twice would only make the answer longer. */
+  if (slope->kind == M42_NODE_NUMBER)
+    return NULL;
+
+  if (n->kind == M42_NODE_CALL)
+    bare = m42_node_call1 (n->name, m42_node_ident (var));
+  else
+    bare = POW (m42_node_ident (var), CP (m42_node_child (n, 1)));
+  inner = integrate_node (bare, var, depth + 1);
+  if (inner == NULL)
+    return NULL;
+  {
+    g_autoptr (M42Node) put = m42_node_substitute (inner, var, inside);
+
+    if (put == NULL)
+      return NULL;
+    return DIV (g_steal_pointer (&put), CP (slope));
+  }
+}
+
 static M42Node *
 integrate_node (const M42Node *n, const char *var, int depth)
 {
@@ -2915,6 +3199,14 @@ integrate_node (const M42Node *n, const char *var, int depth)
       if (answer != NULL)
         return answer;
     }
+
+  /* f(A x + B) with A anything the variable is not in. */
+  {
+    M42Node *by_inside = integrate_inside_linear (n, var, depth);
+
+    if (by_inside != NULL)
+      return by_inside;
+  }
 
   switch (n->kind)
     {
@@ -3641,6 +3933,98 @@ laplace_shifted (const M42Node *a, const M42Node *b, const char *t,
   return NULL;
 }
 
+/* Every factor of a product, however it is nested. */
+static void
+gather_factors (const M42Node *n, GPtrArray *out)
+{
+  if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_STAR)
+    {
+      gather_factors (m42_node_child (n, 0), out);
+      gather_factors (m42_node_child (n, 1), out);
+      return;
+    }
+  g_ptr_array_add (out, (gpointer) n);
+}
+
+/* t^n Exp[a t] f(t), all three at once: the shift moves s, and the
+ * power differentiates what is left n times.  A table gives the two
+ * rules one at a time, and neither alone gets through
+ * t^2 Exp[t] Sin[t]. */
+static M42Node *
+laplace_product (const M42Node *n, const char *t, const char *sname, int depth)
+{
+  g_autoptr (GPtrArray) factors = g_ptr_array_new ();
+  g_autoptr (GPtrArray) rest = g_ptr_array_new ();
+  int power = 0;
+  double rate = 0;
+  M42Node *inner = NULL;
+  M42Node *whole = NULL;
+
+  gather_factors (n, factors);
+  for (guint i = 0; i < factors->len; i++)
+    {
+      const M42Node *factor = g_ptr_array_index (factors, i);
+      int this_power = power_of (factor, t);
+      double slope, shift;
+
+      if (this_power >= 1 && this_power <= 8)
+        {
+          power += this_power;
+          continue;
+        }
+      if (factor->kind == M42_NODE_CALL && factor->children->len == 1 &&
+          (!strcmp (factor->name, "Exp") || !strcmp (factor->name, "exp")) &&
+          linear_coeffs (m42_node_child (factor, 0), t, &slope, &shift) &&
+          fabs (shift) < 1e-14)
+        {
+          rate += slope;
+          continue;
+        }
+      g_ptr_array_add (rest, (gpointer) factor);
+    }
+  if (power == 0 && fabs (rate) < 1e-14)
+    return NULL;
+
+  /* What is left, which may be nothing at all -- t^2 Exp[3 t] is the
+   * two rules applied to 1. */
+  if (rest->len == 0)
+    whole = NUM (1);
+  else
+    {
+      whole = CP (g_ptr_array_index (rest, 0));
+      for (guint i = 1; i < rest->len; i++)
+        whole = MUL (whole, CP (g_ptr_array_index (rest, i)));
+    }
+  inner = laplace_of (whole, t, sname, depth + 1);
+  m42_node_free (whole);
+  if (inner == NULL)
+    return NULL;
+
+  /* The shift: F(s - a). */
+  if (fabs (rate) > 1e-14)
+    {
+      g_autoptr (M42Node) moved = SUB (m42_node_ident (sname), NUM (rate));
+      M42Node *put = m42_node_substitute (inner, sname, moved);
+
+      m42_node_free (inner);
+      if (put == NULL)
+        return NULL;
+      inner = put;
+    }
+  /* And the power: n derivatives, with a minus for an odd n. */
+  for (int k = 0; k < power; k++)
+    {
+      M42Node *next = m42_node_differentiate (inner, sname);
+
+      m42_node_free (inner);
+      inner = next != NULL ? m42_node_simplify (next) : NULL;
+      m42_node_free (next);
+      if (inner == NULL)
+        return NULL;
+    }
+  return power % 2 == 0 ? inner : NEG (inner);
+}
+
 static M42Node *
 laplace_of (const M42Node *n, const char *t, const char *sname, int depth)
 {
@@ -3681,24 +4065,39 @@ laplace_of (const M42Node *n, const char *t, const char *sname, int depth)
           r = laplace_shifted (a, b, t, sname, depth);
           if (r != NULL)
             return r;
+          r = laplace_product (n, t, sname, depth);
+          if (r != NULL)
+            return r;
 
-          /* t f(t) is minus the derivative of what f gives. */
+          /* t^n f(t) is the nth derivative of what f gives, with a
+           * minus in front when n is odd.  With n of 1 that is the
+           * rule every table lists; the same rule with n of 2 is what
+           * t^2 Sin[2 t] wants, and the table had nothing to say. */
           for (int swap = 0; swap < 2; swap++)
             {
               const M42Node *x = swap ? b : a;
               const M42Node *y = swap ? a : b;
+              int power = power_of (x, t);
 
-              if (power_of (x, t) == 1)
+              if (power >= 1 && power <= 8)
                 {
                   g_autoptr (M42Node) inner = laplace_of (y, t, sname, depth + 1);
-                  M42Node *d;
+                  M42Node *step;
 
                   if (inner == NULL)
                     continue;
-                  d = m42_node_differentiate (inner, sname);
-                  if (d == NULL)
+                  step = m42_node_copy (inner);
+                  for (int k = 0; k < power && step != NULL; k++)
+                    {
+                      M42Node *next = m42_node_differentiate (step, sname);
+
+                      m42_node_free (step);
+                      step = next != NULL ? m42_node_simplify (next) : NULL;
+                      m42_node_free (next);
+                    }
+                  if (step == NULL)
                     continue;
-                  return NEG (d);
+                  return power % 2 == 0 ? step : NEG (step);
                 }
             }
           return NULL;

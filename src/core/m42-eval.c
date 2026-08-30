@@ -3532,6 +3532,135 @@ fourier_integral (M42Session *s, const M42Node *f, const char *var,
   }
 }
 
+/* One Fourier coefficient worked out rather than measured.
+ *
+ *   a_k = (1/L) INT f(x) Cos[k Pi (x - m)/L] dx over the interval
+ *   b_k = the same with a sine
+ *
+ * built from the bounds as they were written, so that on [-Pi, Pi] the
+ * angle is k x exactly and not 0.9999999 k x.  The integral is the
+ * symbolic one; when it cannot be done the caller falls back on
+ * quadrature, which is what math42 did for every coefficient before.
+ * NULL when there is no closed form.
+ */
+static M42Node *
+fourier_coefficient_node (M42Session *s, const M42Node *f, const char *var,
+                          const M42Node *lo, const M42Node *hi, int k, gboolean sine)
+{
+  g_autoptr (M42Node) half = NULL;
+  g_autoptr (M42Node) middle = NULL;
+  g_autoptr (M42Node) angle = NULL;
+  g_autoptr (M42Node) integrand = NULL;
+  g_autoptr (M42Node) antiderivative = NULL;
+  g_autoptr (M42Node) whole = NULL;
+  M42Node *top, *bottom;
+
+  {
+    g_autoptr (M42Node) span = m42_node_binary (M42_TOK_MINUS, m42_node_copy (hi),
+                                                m42_node_copy (lo));
+    g_autoptr (M42Node) sum = m42_node_binary (M42_TOK_PLUS, m42_node_copy (lo),
+                                               m42_node_copy (hi));
+
+    /* simplify_hard rather than the plain one: the half of an interval
+     * is Pi/2 + Pi/2 before the like terms are put together, and an
+     * angle written over that is one nothing can integrate. */
+    g_autoptr (M42Node) raw_half =
+      m42_node_binary (M42_TOK_SLASH, m42_node_copy (span), m42_node_number (2));
+    g_autoptr (M42Node) raw_middle =
+      m42_node_binary (M42_TOK_SLASH, m42_node_copy (sum), m42_node_number (2));
+
+    half = simplify_hard (s, raw_half);
+    middle = simplify_hard (s, raw_middle);
+  }
+  if (half == NULL || middle == NULL)
+    return NULL;
+
+  if (k == 0)
+    angle = m42_node_number (0);
+  else
+    {
+      g_autoptr (M42Node) shifted =
+        m42_node_binary (M42_TOK_MINUS, m42_node_ident (var), m42_node_copy (middle));
+      g_autoptr (M42Node) scaled =
+        m42_node_binary (M42_TOK_STAR,
+                         m42_node_binary (M42_TOK_STAR, m42_node_number (k),
+                                          m42_node_ident ("Pi")),
+                         g_steal_pointer (&shifted));
+
+      {
+        g_autoptr (M42Node) raw_angle =
+          m42_node_binary (M42_TOK_SLASH, g_steal_pointer (&scaled),
+                           m42_node_copy (half));
+
+        angle = simplify_hard (s, raw_angle);
+      }
+    }
+  if (angle == NULL)
+    return NULL;
+
+  if (k == 0 && sine)
+    return m42_node_number (0);
+  integrand = k == 0
+                ? m42_node_copy (f)
+                : m42_node_binary (M42_TOK_STAR, m42_node_copy (f),
+                                   m42_node_call1 (sine ? "Sin" : "Cos",
+                                                   m42_node_copy (angle)));
+  /* Tidied first: the integrator wants the integrand in its plainest
+   * shape, and a coefficient built out of the bounds is not in it. */
+  {
+    M42Node *tidy = simplify_hard (s, integrand);
+
+    if (tidy != NULL)
+      {
+        m42_node_free (integrand);
+        integrand = tidy;
+      }
+  }
+  antiderivative = m42_node_integrate (integrand, var);
+  if (antiderivative == NULL)
+    return NULL;
+
+  /* Its value at the two ends, worked out the way the rest of math42
+   * works things out, so that Sin[k Pi] is nothing rather than 1e-16. */
+  {
+    g_autoptr (M42Node) at_top = m42_node_substitute (antiderivative, var, hi);
+    g_autoptr (M42Node) at_bottom = m42_node_substitute (antiderivative, var, lo);
+    g_autoptr (M42Value) top_value = at_top != NULL ? eval (s, at_top) : NULL;
+    g_autoptr (M42Value) bottom_value = at_bottom != NULL ? eval (s, at_bottom) : NULL;
+
+    if (top_value == NULL || bottom_value == NULL ||
+        is_error (top_value) || is_error (bottom_value))
+      return NULL;
+    top = value_to_node (top_value);
+    bottom = value_to_node (bottom_value);
+    if (top == NULL || bottom == NULL)
+      {
+        m42_node_free (top);
+        m42_node_free (bottom);
+        return NULL;
+      }
+  }
+  whole = m42_node_binary (M42_TOK_SLASH,
+                           m42_node_binary (M42_TOK_MINUS, top, bottom),
+                           m42_node_copy (half));
+  {
+    g_autoptr (M42Value) worked = eval (s, whole);
+    M42Node *as_node;
+
+    if (is_error (worked))
+      return NULL;
+    as_node = value_to_node (worked);
+    if (as_node == NULL)
+      return NULL;
+    {
+      M42Node *tidy = simplify_hard (s, as_node);
+
+      m42_node_free (as_node);
+      return tidy;
+    }
+  }
+}
+
 /* FourierSeries[f, {x, a, b}, n]: the truncated series, as an
  * expression you can plot next to the function it came from. */
 static M42Value *
@@ -3572,17 +3701,43 @@ fourier_series (M42Session *s, const M42Node *call, gboolean coefficients_only)
   if (coefficients_only)
     pairs = m42_value_list_new ();
   else
-    out = coefficient_node (a0 / 2);
+    {
+      /* The mean value, worked out rather than measured where the
+       * integral has a closed form: on [-Pi, Pi] the constant term of
+       * x^2 is Pi^2/3, and quadrature can only say 3.2898681. */
+      M42Node *exact = fourier_coefficient_node (s, m42_node_child (call, 0), var,
+                                                 m42_node_child (spec, 1),
+                                                 m42_node_child (spec, 2), 0, FALSE);
+
+      if (exact != NULL)
+        out = simplify_hard (s, m42_node_binary (M42_TOK_SLASH, exact,
+                                                 m42_node_number (2)));
+      else
+        out = coefficient_node (a0 / 2);
+    }
 
   for (int k = 1; k <= (int) order; k++)
     {
       double ak = fourier_integral (s, m42_node_child (call, 0), var, lo, hi, k, FALSE);
       double bk = fourier_integral (s, m42_node_child (call, 0), var, lo, hi, k, TRUE);
+      M42Node *ak_node = fourier_coefficient_node (s, m42_node_child (call, 0), var,
+                                                   m42_node_child (spec, 1),
+                                                   m42_node_child (spec, 2), k, FALSE);
+      M42Node *bk_node = fourier_coefficient_node (s, m42_node_child (call, 0), var,
+                                                   m42_node_child (spec, 1),
+                                                   m42_node_child (spec, 2), k, TRUE);
 
       if (fabs (ak) < 1e-9)
         ak = 0;
       if (fabs (bk) < 1e-9)
         bk = 0;
+      /* A coefficient the quadrature says is nothing is nothing, and a
+       * closed form that says otherwise is the integral of a wave
+       * against a wave coming out as 1e-17 rather than 0. */
+      if (ak == 0)
+        g_clear_pointer (&ak_node, m42_node_free);
+      if (bk == 0)
+        g_clear_pointer (&bk_node, m42_node_free);
 
       if (coefficients_only)
         {
@@ -3625,16 +3780,26 @@ fourier_series (M42Session *s, const M42Node *call, gboolean coefficients_only)
 
         if (ak != 0)
           {
-            M42Node *term = m42_node_binary (M42_TOK_STAR, coefficient_node (ak),
-                                             m42_node_call1 ("Cos", m42_node_copy (inside)));
+            M42Node *term =
+              m42_node_binary (M42_TOK_STAR,
+                               ak_node != NULL ? ak_node : coefficient_node (ak),
+                               m42_node_call1 ("Cos", m42_node_copy (inside)));
+
+            ak_node = NULL;
             out = m42_node_binary (M42_TOK_PLUS, out, term);
           }
         if (bk != 0)
           {
-            M42Node *term = m42_node_binary (M42_TOK_STAR, coefficient_node (bk),
-                                             m42_node_call1 ("Sin", m42_node_copy (inside)));
+            M42Node *term =
+              m42_node_binary (M42_TOK_STAR,
+                               bk_node != NULL ? bk_node : coefficient_node (bk),
+                               m42_node_call1 ("Sin", m42_node_copy (inside)));
+
+            bk_node = NULL;
             out = m42_node_binary (M42_TOK_PLUS, out, term);
           }
+        m42_node_free (ak_node);
+        m42_node_free (bk_node);
         m42_node_free (inside);
       }
     }
@@ -4874,7 +5039,12 @@ simplify_arguments (M42Session *s, M42Node *n)
     {
       M42Node *c = g_ptr_array_index (n->children, i);
 
-      if (n->kind == M42_NODE_CALL)
+      /* The two halves of a quotient get the same care as the
+       * arguments of a function: the numerator of a derivative of a
+       * quotient is a sum waiting to be gathered, and
+       * (s^2 + 1 - 2 s^2)/(s^2 + 1)^2 means (1 - s^2)/(s^2 + 1)^2. */
+      if (n->kind == M42_NODE_CALL ||
+          (n->kind == M42_NODE_BINARY && n->op == M42_TOK_SLASH))
         {
           M42Node *shorter = simplify_hard (s, c);
 
@@ -16640,6 +16810,18 @@ eval_call (M42Session *s, const M42Node *n)
                             : m42_node_inverse_laplace (f, from->name, to->name);
       if (transformed == NULL)
         return m42_value_error ("%s: that one is not in the table", name);
+      /* The rules leave a derivative of a quotient behind, which is
+       * right but unreadable: t Cos[t] comes out as
+       * -((s^2 + 1 - 2 s^2)/(s^2 + 1)^2) and means (s^2 - 1)/(s^2 + 1)^2. */
+      {
+        M42Node *tidy = simplify_hard (s, transformed);
+
+        if (tidy != NULL)
+          {
+            m42_node_free (transformed);
+            transformed = tidy;
+          }
+      }
       return expr_result (transformed);
     }
   /* ZTransform[f, n, z]: the sequence is looked at as it was written,
