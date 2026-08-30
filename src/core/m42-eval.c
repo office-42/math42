@@ -486,6 +486,9 @@ static M42Value *import_file (const char *path, const char *what);
 static M42Node *cancel_common_factor (const M42Node *tree);
 static M42Value *solve (M42Session *s, const M42Node *call);
 static M42Node *simplify_hard (M42Session *s, const M42Node *written);
+static gboolean poly_coeffs (const M42Node *n, const char *var, GArray *out, int depth);
+static int compare_doubles (gconstpointer a, gconstpointer b);
+static M42Value *solve_by_inverting (M42Session *s, const M42Node *lhs, const char *var);
 static gboolean pattern_test (const M42Node *test, GHashTable *names, gpointer user_data);
 static void add_contours (M42Plot *p, const double *z, guint n, double x0, double x1,
                           double y0, double y1, double lowest, double highest,
@@ -1478,6 +1481,13 @@ map2 (int op, M42Value *a, M42Value *b)
           if (big != NULL)
             return big;
         }
+      /* A negative number to a power that is not whole is complex, as
+       * it is in both languages: (-8)^(1/3) is the principal root,
+       * 1 + Sqrt[3] I, and not something to give up on.  pow gives a
+       * NaN there, which came out as Indeterminate. */
+      if (op == M42_TOK_CARET && a->u.number < 0 &&
+          b->u.number != floor (b->u.number) && isfinite (b->u.number))
+        return from_complex (cpow (a->u.number, b->u.number));
       return m42_value_number (apply_op (op, a->u.number, b->u.number));
     }
 
@@ -4705,8 +4715,16 @@ gather_conditions (const M42Node *n, GPtrArray *out)
   g_ptr_array_add (out, (gpointer) n);
 }
 
-/* +1 when the expression is known to be above nothing, -1 when below,
- * and 0 when nothing said so. */
+/* What a condition says about a letter.  The sign is kept as two
+ * strengths, since Sqrt[x^2] is x when x is merely not negative while
+ * Sign[x] is 1 only when x is really above nothing. */
+#define SIGN_ABOVE   2   /* > 0 */
+#define SIGN_AT_MOST 1   /* >= 0 */
+#define SIGN_UNKNOWN 0
+
+/* +2 above nothing, +1 not below it, -2 below nothing, -1 not above
+ * it, 0 when nothing said.  A comparison against any number counts:
+ * x > 2 says x is above nothing as surely as x > 0 does. */
 static int
 known_sign (GPtrArray *conditions, const M42Node *u)
 {
@@ -4715,7 +4733,7 @@ known_sign (GPtrArray *conditions, const M42Node *u)
   if (u == NULL)
     return 0;
   if (constant_fold (u, &x) && isfinite (x))
-    return x > 0 ? 1 : x < 0 ? -1 : 0;
+    return x > 0 ? SIGN_ABOVE : x < 0 ? -SIGN_ABOVE : SIGN_AT_MOST;
 
   /* A letter that one of the conditions speaks about. */
   if (u->kind == M42_NODE_IDENT)
@@ -4724,41 +4742,137 @@ known_sign (GPtrArray *conditions, const M42Node *u)
         const M42Node *c = g_ptr_array_index (conditions, i);
         const M42Node *left, *right;
         double against;
+        int op;
 
+        /* Positive[x] and its companions say it in words. */
+        if (c->kind == M42_NODE_CALL && c->children->len == 1 &&
+            m42_node_child (c, 0)->kind == M42_NODE_IDENT &&
+            strcmp (m42_node_child (c, 0)->name, u->name) == 0)
+          {
+            if (strcmp (c->name, "Positive") == 0)
+              return SIGN_ABOVE;
+            if (strcmp (c->name, "Negative") == 0)
+              return -SIGN_ABOVE;
+            if (strcmp (c->name, "NonNegative") == 0)
+              return SIGN_AT_MOST;
+            if (strcmp (c->name, "NonPositive") == 0)
+              return -SIGN_AT_MOST;
+            continue;
+          }
         if (c->kind != M42_NODE_BINARY)
           continue;
-        if (c->op != M42_TOK_GT && c->op != M42_TOK_GE &&
-            c->op != M42_TOK_LT && c->op != M42_TOK_LE)
+        op = c->op;
+        if (op != M42_TOK_GT && op != M42_TOK_GE &&
+            op != M42_TOK_LT && op != M42_TOK_LE)
           continue;
         left = m42_node_child (c, 0);
         right = m42_node_child (c, 1);
-        if (left->kind != M42_NODE_IDENT || strcmp (left->name, u->name) != 0)
+        /* 2 < x is x > 2 the other way about. */
+        if (right->kind == M42_NODE_IDENT && strcmp (right->name, u->name) == 0 &&
+            constant_fold (left, &against))
+          {
+            op = op == M42_TOK_GT ? M42_TOK_LT : op == M42_TOK_GE ? M42_TOK_LE
+                 : op == M42_TOK_LT ? M42_TOK_GT : M42_TOK_GE;
+          }
+        else if (left->kind == M42_NODE_IDENT && strcmp (left->name, u->name) == 0 &&
+                 constant_fold (right, &against))
+          ;
+        else
           continue;
-        if (!constant_fold (right, &against) || against != 0)
-          continue;
-        if (c->op == M42_TOK_GT)
-          return 1;
-        if (c->op == M42_TOK_GE)
-          return 1;
-        return -1;
+
+        if ((op == M42_TOK_GT && against >= 0) || (op == M42_TOK_GE && against > 0))
+          return SIGN_ABOVE;
+        if (op == M42_TOK_GE && against == 0)
+          return SIGN_AT_MOST;
+        if ((op == M42_TOK_LT && against <= 0) || (op == M42_TOK_LE && against < 0))
+          return -SIGN_ABOVE;
+        if (op == M42_TOK_LE && against == 0)
+          return -SIGN_AT_MOST;
       }
 
   /* Exp is above nothing whatever is inside it, and a product or a
    * quotient goes by the signs of its halves. */
   if (u->kind == M42_NODE_CALL && u->children->len == 1 &&
       (strcmp (u->name, "Exp") == 0 || strcmp (u->name, "exp") == 0))
-    return 1;
+    return SIGN_ABOVE;
   if (u->kind == M42_NODE_BINARY &&
       (u->op == M42_TOK_STAR || u->op == M42_TOK_SLASH))
     {
       int a = known_sign (conditions, m42_node_child (u, 0));
       int b = known_sign (conditions, m42_node_child (u, 1));
 
-      return a == 0 || b == 0 ? 0 : a * b;
+      if (a == 0 || b == 0)
+        return 0;
+      /* The weaker of the two: not-below times above is not-below. */
+      return (a < 0) == (b < 0) ? MIN (ABS (a), ABS (b))
+                                : -MIN (ABS (a), ABS (b));
     }
   if (u->kind == M42_NODE_UNARY && u->op == M42_TOK_MINUS)
     return -known_sign (conditions, m42_node_child (u, 0));
   return 0;
+}
+
+/* Whether the conditions say the letter belongs to a set: Reals,
+ * Integers, Rationals, Complexes, written as Mathematica writes it,
+ * Element[x, Reals].  A whole number is a real number too, and a
+ * rational one, so the question is answered by what implies what. */
+static gboolean
+known_element (GPtrArray *conditions, const M42Node *u, const char *set)
+{
+  if (u == NULL || u->kind != M42_NODE_IDENT)
+    return FALSE;
+  for (guint i = 0; i < conditions->len; i++)
+    {
+      const M42Node *c = g_ptr_array_index (conditions, i);
+      const char *said;
+
+      if (c->kind != M42_NODE_CALL || c->children->len != 2 ||
+          strcmp (c->name, "Element") != 0 ||
+          m42_node_child (c, 0)->kind != M42_NODE_IDENT ||
+          strcmp (m42_node_child (c, 0)->name, u->name) != 0 ||
+          m42_node_child (c, 1)->kind != M42_NODE_IDENT)
+        continue;
+      said = m42_node_child (c, 1)->name;
+      if (strcmp (said, set) == 0)
+        return TRUE;
+      if (strcmp (set, "Reals") == 0 &&
+          (strcmp (said, "Integers") == 0 || strcmp (said, "Rationals") == 0))
+        return TRUE;
+      if (strcmp (set, "Rationals") == 0 && strcmp (said, "Integers") == 0)
+        return TRUE;
+    }
+  /* A letter known to be above or below nothing is a real number. */
+  if (strcmp (set, "Reals") == 0 && known_sign (conditions, u) != 0)
+    return TRUE;
+  return FALSE;
+}
+
+/* Whether every letter in a tree is known to be real, which is what
+ * lets Conjugate be dropped from a whole expression rather than from
+ * a letter. */
+static gboolean
+all_real (GPtrArray *conditions, const M42Node *n)
+{
+  if (n == NULL)
+    return TRUE;
+  if (n->kind == M42_NODE_IDENT)
+    {
+      static const char *const KNOWN[] = { "Pi", "E", "Degree", "GoldenRatio",
+                                           "EulerGamma", "Infinity" };
+
+      for (guint i = 0; i < G_N_ELEMENTS (KNOWN); i++)
+        if (strcmp (n->name, KNOWN[i]) == 0)
+          return TRUE;
+      return known_element (conditions, n, "Reals");
+    }
+  if (n->kind == M42_NODE_NUMBER)
+    return TRUE;
+  if (n->children == NULL)
+    return TRUE;
+  for (guint i = 0; i < n->children->len; i++)
+    if (!all_real (conditions, m42_node_child (n, i)))
+      return FALSE;
+  return TRUE;
 }
 
 /* The rules that need to know a sign, applied everywhere in a tree. */
@@ -4794,16 +4908,115 @@ refine_tree (M42Session *s, const M42Node *n, GPtrArray *conditions)
           return sign > 0 ? inside : m42_node_unary (M42_TOK_MINUS, inside);
         }
     }
-  /* Sign[u] likewise. */
+  /* Sign[u] likewise -- but only when u is really above or below
+   * nothing, since the sign of nothing is nothing. */
   if (out->kind == M42_NODE_CALL && out->children->len == 1 &&
       (strcmp (out->name, "Sign") == 0 || strcmp (out->name, "sign") == 0))
     {
       int sign = known_sign (conditions, m42_node_child (out, 0));
 
-      if (sign != 0)
+      if (sign == SIGN_ABOVE || sign == -SIGN_ABOVE)
         {
           m42_node_free (out);
-          return m42_node_number (sign);
+          return m42_node_number (sign > 0 ? 1 : -1);
+        }
+    }
+
+  /* What being a real number is worth: a number that is its own
+   * conjugate, has nothing imaginary about it, and is its own real
+   * part. */
+  if (out->kind == M42_NODE_CALL && out->children->len == 1)
+    {
+      const M42Node *inside = m42_node_child (out, 0);
+      gboolean real = all_real (conditions, inside);
+
+      if (real && (strcmp (out->name, "Conjugate") == 0 ||
+                   strcmp (out->name, "conj") == 0 ||
+                   strcmp (out->name, "Re") == 0 || strcmp (out->name, "real") == 0))
+        {
+          M42Node *under = g_ptr_array_steal_index (out->children, 0);
+
+          m42_node_free (out);
+          return under;
+        }
+      if (real && (strcmp (out->name, "Im") == 0 || strcmp (out->name, "imag") == 0))
+        {
+          m42_node_free (out);
+          return m42_node_number (0);
+        }
+    }
+
+  /* And what being a whole number is worth: a wave at a whole number
+   * of half turns is nothing, or one, or minus one, and rounding it
+   * leaves it where it was. */
+  if (out->kind == M42_NODE_CALL && out->children->len == 1)
+    {
+      const M42Node *inside = m42_node_child (out, 0);
+      const M42Node *letter = NULL;
+      double multiple = 0;
+
+      /* Sin[n Pi], Cos[2 n Pi] and the like: how many half turns. */
+      if (inside->kind == M42_NODE_BINARY && inside->op == M42_TOK_STAR)
+        {
+          const M42Node *a = m42_node_child (inside, 0);
+          const M42Node *b = m42_node_child (inside, 1);
+          double times = 1;
+
+          if (b->kind == M42_NODE_IDENT && strcmp (b->name, "Pi") == 0)
+            {
+              if (a->kind == M42_NODE_IDENT)
+                letter = a;
+              else if (a->kind == M42_NODE_BINARY && a->op == M42_TOK_STAR &&
+                       constant_fold (m42_node_child (a, 0), &times) &&
+                       m42_node_child (a, 1)->kind == M42_NODE_IDENT)
+                letter = m42_node_child (a, 1);
+              multiple = times;
+            }
+        }
+      if (letter != NULL && known_element (conditions, letter, "Integers") &&
+          multiple == floor (multiple))
+        {
+          gboolean whole_turns = fmod (fabs (multiple), 2.0) == 0;
+
+          if (strcmp (out->name, "Sin") == 0 || strcmp (out->name, "sin") == 0 ||
+              strcmp (out->name, "Tan") == 0 || strcmp (out->name, "tan") == 0)
+            {
+              m42_node_free (out);
+              return m42_node_number (0);
+            }
+          if (whole_turns &&
+              (strcmp (out->name, "Cos") == 0 || strcmp (out->name, "cos") == 0))
+            {
+              m42_node_free (out);
+              return m42_node_number (1);
+            }
+          if (!whole_turns && multiple == 1 &&
+              (strcmp (out->name, "Cos") == 0 || strcmp (out->name, "cos") == 0))
+            {
+              /* Cos[n Pi] is (-1)^n. */
+              M42Node *power = m42_node_binary (M42_TOK_CARET, m42_node_number (-1),
+                                                m42_node_copy (letter));
+
+              m42_node_free (out);
+              return power;
+            }
+        }
+      if (known_element (conditions, inside, "Integers") &&
+          (strcmp (out->name, "Floor") == 0 || strcmp (out->name, "Ceiling") == 0 ||
+           strcmp (out->name, "Round") == 0 || strcmp (out->name, "floor") == 0 ||
+           strcmp (out->name, "ceil") == 0 || strcmp (out->name, "round") == 0 ||
+           strcmp (out->name, "IntegerPart") == 0 || strcmp (out->name, "fix") == 0))
+        {
+          M42Node *under = g_ptr_array_steal_index (out->children, 0);
+
+          m42_node_free (out);
+          return under;
+        }
+      if (known_element (conditions, inside, "Integers") &&
+          (strcmp (out->name, "IntegerQ") == 0 || strcmp (out->name, "isinteger") == 0))
+        {
+          m42_node_free (out);
+          return m42_node_number (1);
         }
     }
   /* Sqrt[u^2] is u, and Sqrt[u]^2 is u, when u is above nothing. */
@@ -4818,6 +5031,7 @@ refine_tree (M42Session *s, const M42Node *n, GPtrArray *conditions)
           known_sign (conditions, m42_node_child (inside, 0)) != 0)
         {
           int sign = known_sign (conditions, m42_node_child (inside, 0));
+
           M42Node *under = m42_node_copy (m42_node_child (inside, 0));
 
           m42_node_free (out);
@@ -6369,6 +6583,418 @@ rsolve (M42Session *s, const M42Node *call)
   return expr_result (out);
 }
 
+/* --- Reduce -------------------------------------------------------------
+ *
+ * Solve answers with the roots it can find; Reduce answers with the
+ * whole truth, conditions and all.  a x + b == 0 is not simply
+ * x == -b/a: it is that when a is not nothing, and every x at all when
+ * a and b are both nothing, and no x when a is nothing and b is not.
+ * Mathematica writes that as
+ *
+ *   a != 0 && x == -(b/a) || a == 0 && b == 0
+ *
+ * and so does math42.  An inequality is answered with the stretches of
+ * the line where it holds, which are found by looking at the sign of
+ * the polynomial between its roots.
+ */
+
+static M42Node *
+either (M42Node *a, M42Node *b)
+{
+  if (a == NULL)
+    return b;
+  if (b == NULL)
+    return a;
+  return m42_node_binary (M42_TOK_OR, a, b);
+}
+
+static M42Node *
+both (M42Node *a, M42Node *b)
+{
+  if (a == NULL)
+    return b;
+  if (b == NULL)
+    return a;
+  return m42_node_binary (M42_TOK_AND, a, b);
+}
+
+static M42Node *
+is_it (int op, const char *var, M42Node *what)
+{
+  return m42_node_binary (op, m42_node_ident (var), what);
+}
+
+/* x == that, with the number written as a fraction where it is one. */
+static M42Node *
+equals_number (const char *var, double x)
+{
+  return is_it (M42_TOK_EQ, var, coefficient_node (x));
+}
+
+/* The real roots of a polynomial, in order and without repeats. */
+static gboolean
+real_roots_of (const M42Node *lhs, const char *var, GArray *out)
+{
+  g_autoptr (GArray) coeffs = g_array_new (FALSE, TRUE, sizeof (double));
+  g_autoptr (GArray) found = g_array_new (FALSE, FALSE, sizeof (double _Complex));
+
+  if (!poly_coeffs (lhs, var, coeffs, 0) || coeffs->len < 2)
+    return FALSE;
+  if (!polynomial_roots (coeffs, found))
+    return FALSE;
+  for (guint i = 0; i < found->len; i++)
+    {
+      double _Complex r = g_array_index (found, double _Complex, i);
+      double x = creal (r);
+      gboolean already = FALSE;
+
+      if (fabs (cimag (r)) > 1e-9)
+        continue;
+      if (fabs (x - round (x)) < 1e-9)
+        x = round (x);
+      for (guint k = 0; k < out->len; k++)
+        if (fabs (g_array_index (out, double, k) - x) < 1e-9)
+          already = TRUE;
+      if (!already)
+        g_array_append_val (out, x);
+    }
+  g_array_sort (out, compare_doubles);
+  return TRUE;
+}
+
+/* Whether the inequality holds at a place. */
+static gboolean
+holds_at (M42Session *s, const M42Node *lhs, const char *var, int op, double x)
+{
+  double y = number_at (s, lhs, var, x);
+
+  if (!isfinite (y))
+    return FALSE;
+  switch (op)
+    {
+    case M42_TOK_LT: return y < 0;
+    case M42_TOK_LE: return y <= 1e-12;
+    case M42_TOK_GT: return y > 0;
+    case M42_TOK_GE: return y >= -1e-12;
+    case M42_TOK_NE: return fabs (y) > 1e-12;
+    default:         return fabs (y) <= 1e-12;
+    }
+}
+
+/* An inequality in one letter, as the stretches of the line where it
+ * holds: the roots cut the line into pieces, and a polynomial keeps
+ * its sign inside each piece, so one place in each piece settles it. */
+static M42Value *
+reduce_inequality (M42Session *s, const M42Node *lhs, const char *var, int op)
+{
+  g_autoptr (GArray) roots = g_array_new (FALSE, FALSE, sizeof (double));
+  gboolean strict = op == M42_TOK_LT || op == M42_TOK_GT || op == M42_TOK_NE;
+  int low_op = strict ? M42_TOK_LT : M42_TOK_LE;
+  int high_op = strict ? M42_TOK_GT : M42_TOK_GE;
+  M42Node *answer = NULL;
+  guint pieces, held = 0;
+
+  if (!real_roots_of (lhs, var, roots))
+    return NULL;
+  pieces = roots->len + 1;
+
+  for (guint i = 0; i < pieces; i++)
+    {
+      double left = i == 0 ? 0 : g_array_index (roots, double, i - 1);
+      double right = i == roots->len ? 0 : g_array_index (roots, double, i);
+      double middle;
+
+      if (roots->len == 0)
+        middle = 0;
+      else if (i == 0)
+        middle = right - 1;
+      else if (i == roots->len)
+        middle = left + 1;
+      else
+        middle = (left + right) / 2;
+
+      if (!holds_at (s, lhs, var, op, middle))
+        continue;
+      held++;
+
+      if (roots->len == 0)
+        answer = either (answer, m42_node_ident ("True"));
+      else if (i == 0)
+        answer = either (answer, is_it (low_op, var, coefficient_node (right)));
+      else if (i == roots->len)
+        answer = either (answer, is_it (high_op, var, coefficient_node (left)));
+      else
+        answer = either (answer,
+                         both (m42_node_binary (high_op, m42_node_ident (var),
+                                                coefficient_node (left)),
+                               m42_node_binary (low_op, m42_node_ident (var),
+                                                coefficient_node (right))));
+    }
+
+  /* Everywhere: then say so, rather than naming every stretch.  With
+   * a strict sign the roots themselves are still out, so x^2 > 0 is
+   * every x but nothing. */
+  if (held == pieces)
+    {
+      m42_node_free (answer);
+      answer = NULL;
+      if (strict)
+        for (guint i = 0; i < roots->len; i++)
+          answer = both (answer, is_it (M42_TOK_NE, var,
+                                        coefficient_node (g_array_index (roots, double, i))));
+      if (answer == NULL)
+        answer = m42_node_ident ("True");
+      return expr_result (answer);
+    }
+
+  /* A root of its own, where the stretches either side do not hold but
+   * the place itself does: x^2 <= 0 is x == 0 and nothing else.  The
+   * step has to be wide enough that the polynomial has really moved:
+   * a hair either side of a double root it is still nothing to the
+   * tolerance, and the root looked like part of a stretch. */
+  if (!strict)
+    for (guint i = 0; i < roots->len; i++)
+      {
+        double r = g_array_index (roots, double, i);
+        double step = 1e-3 * MAX (1.0, fabs (r));
+
+        if (holds_at (s, lhs, var, op, r) &&
+            !holds_at (s, lhs, var, op, r - step) &&
+            !holds_at (s, lhs, var, op, r + step))
+          answer = either (answer, equals_number (var, r));
+      }
+  /* And the other way about, for != : the line less its roots. */
+  if (op == M42_TOK_NE && answer != NULL && roots->len > 0)
+    {
+      m42_node_free (answer);
+      answer = NULL;
+      for (guint i = 0; i < roots->len; i++)
+        answer = both (answer, is_it (M42_TOK_NE, var,
+                                      coefficient_node (g_array_index (roots, double, i))));
+    }
+
+  if (answer == NULL)
+    answer = m42_node_ident ("False");
+  return expr_result (m42_node_simplify (answer));
+}
+
+/* Reduce[eq, x] for an equation, with the cases the coefficients
+ * themselves can fall into. */
+static M42Value *
+reduce_equation (M42Session *s, const M42Node *lhs, const char *var)
+{
+  g_autoptr (GArray) coeffs = g_array_new (FALSE, TRUE, sizeof (double));
+  g_autoptr (GPtrArray) terms = NULL;
+
+  /* Numbers all through: the roots are the whole answer. */
+  if (poly_coeffs (lhs, var, coeffs, 0) && coeffs->len >= 2)
+    {
+      g_autoptr (GArray) found = g_array_new (FALSE, FALSE, sizeof (double _Complex));
+      M42Node *answer = NULL;
+
+      if (polynomial_roots (coeffs, found))
+        {
+          for (guint i = 0; i < found->len; i++)
+            {
+              double _Complex r = g_array_index (found, double _Complex, i);
+              gboolean already = FALSE;
+              M42Node *what;
+
+              for (guint k = 0; k < i; k++)
+                if (cabs (g_array_index (found, double _Complex, k) - r) < 1e-9)
+                  already = TRUE;
+              if (already)
+                continue;
+              if (fabs (cimag (r)) < 1e-12)
+                what = coefficient_node (creal (r));
+              else
+                {
+                  M42Node *im = m42_node_binary (M42_TOK_STAR,
+                                                 coefficient_node (cimag (r)),
+                                                 m42_node_ident ("I"));
+
+                  what = creal (r) == 0 ? im
+                         : m42_node_binary (M42_TOK_PLUS, coefficient_node (creal (r)),
+                                            im);
+                }
+              answer = either (answer, is_it (M42_TOK_EQ, var, what));
+            }
+          if (answer == NULL)
+            answer = m42_node_ident ("False");
+          return expr_result (m42_node_simplify (answer));
+        }
+    }
+
+  /* Letters for coefficients: every case they can fall into. */
+  terms = m42_node_poly_terms (lhs, var);
+  if (terms == NULL || terms->len < 2 || terms->len > 3)
+    return NULL;
+  {
+    const M42Node *b = g_ptr_array_index (terms, 0);
+    const M42Node *a = g_ptr_array_index (terms, 1);
+    M42Node *answer;
+
+    if (terms->len == 2)
+      {
+        /* a x + b == 0 */
+        M42Node *root = m42_node_binary (M42_TOK_SLASH,
+                                         m42_node_unary (M42_TOK_MINUS, m42_node_copy (b)),
+                                         m42_node_copy (a));
+
+        answer = either (both (m42_node_binary (M42_TOK_NE, m42_node_copy (a),
+                                                m42_node_number (0)),
+                               is_it (M42_TOK_EQ, var, m42_node_simplify (root))),
+                         both (m42_node_binary (M42_TOK_EQ, m42_node_copy (a),
+                                                m42_node_number (0)),
+                               m42_node_binary (M42_TOK_EQ, m42_node_copy (b),
+                                                m42_node_number (0))));
+        m42_node_free (root);
+        return expr_result (answer);
+      }
+    {
+      /* a x^2 + b x + c == 0: the quadratic when a is not nothing, and
+       * the line it becomes when a is. */
+      const M42Node *c = g_ptr_array_index (terms, 2);
+      const M42Node *aa = c, *bb = a, *cc = b;   /* a x^2 + b x + c */
+      M42Node *under =
+        m42_node_binary (M42_TOK_MINUS,
+                         m42_node_binary (M42_TOK_CARET, m42_node_copy (bb),
+                                          m42_node_number (2)),
+                         m42_node_binary (M42_TOK_STAR, m42_node_number (4),
+                                          m42_node_binary (M42_TOK_STAR,
+                                                           m42_node_copy (aa),
+                                                           m42_node_copy (cc))));
+      M42Node *root = m42_node_call1 ("Sqrt", under);
+      M42Node *quadratic = NULL;
+      M42Node *line;
+
+      for (int side = 0; side < 2; side++)
+        {
+          M42Node *top = m42_node_binary (side == 0 ? M42_TOK_MINUS : M42_TOK_PLUS,
+                                          m42_node_unary (M42_TOK_MINUS,
+                                                          m42_node_copy (bb)),
+                                          m42_node_copy (root));
+          M42Node *whole =
+            m42_node_binary (M42_TOK_SLASH, top,
+                             m42_node_binary (M42_TOK_STAR, m42_node_number (2),
+                                              m42_node_copy (aa)));
+
+          quadratic = either (quadratic, is_it (M42_TOK_EQ, var,
+                                                m42_node_simplify (whole)));
+          m42_node_free (whole);
+        }
+      m42_node_free (root);
+
+      line = either (both (m42_node_binary (M42_TOK_NE, m42_node_copy (bb),
+                                            m42_node_number (0)),
+                           is_it (M42_TOK_EQ, var,
+                                  m42_node_simplify (
+                                    m42_node_binary (M42_TOK_SLASH,
+                                                     m42_node_unary (M42_TOK_MINUS,
+                                                                     m42_node_copy (cc)),
+                                                     m42_node_copy (bb))))),
+                     both (m42_node_binary (M42_TOK_EQ, m42_node_copy (bb),
+                                            m42_node_number (0)),
+                           m42_node_binary (M42_TOK_EQ, m42_node_copy (cc),
+                                            m42_node_number (0))));
+
+      answer = either (both (m42_node_binary (M42_TOK_NE, m42_node_copy (aa),
+                                              m42_node_number (0)),
+                             quadratic),
+                       both (m42_node_binary (M42_TOK_EQ, m42_node_copy (aa),
+                                              m42_node_number (0)),
+                             line));
+      return expr_result (answer);
+    }
+  }
+}
+
+static M42Value *
+reduce (M42Session *s, const M42Node *call)
+{
+  const M42Node *what, *spec;
+  const char *var;
+  g_autoptr (M42Node) lhs = NULL;
+  int op;
+
+  if (call->children->len != 2)
+    return m42_value_error ("Reduce expects a statement and a letter");
+  what = m42_node_child (call, 0);
+  spec = m42_node_child (call, 1);
+  if (spec->kind != M42_NODE_IDENT)
+    return m42_value_error ("Reduce expects a letter as its second argument");
+  var = spec->name;
+
+  if (what->kind != M42_NODE_BINARY ||
+      (what->op != M42_TOK_EQ && what->op != M42_TOK_NE && what->op != M42_TOK_LT &&
+       what->op != M42_TOK_LE && what->op != M42_TOK_GT && what->op != M42_TOK_GE))
+    return m42_value_error ("Reduce wants an equation or an inequality; a system of "
+                            "them, or one in several letters, is beyond it");
+  op = what->op;
+  lhs = m42_node_binary (M42_TOK_MINUS,
+                         symbolic_argument (s, m42_node_child (what, 0), var),
+                         symbolic_argument (s, m42_node_child (what, 1), var));
+
+  if (!m42_node_depends_on (lhs, var))
+    {
+      /* Nothing to solve: it holds everywhere or nowhere. */
+      double y = number_at (s, lhs, var, 0);
+
+      if (!isfinite (y))
+        return m42_value_error ("Reduce: the letter is not in it, and what is cannot "
+                                "be worked out");
+      return expr_result (m42_node_ident (holds_at (s, lhs, var, op, 0) ? "True"
+                                                                       : "False"));
+    }
+
+  if (op == M42_TOK_EQ)
+    {
+      M42Value *answer = reduce_equation (s, lhs, var);
+
+      if (answer != NULL)
+        return answer;
+      /* Not a polynomial: a function of the letter that can be turned
+       * round is answered by turning it round, so long as it has one
+       * inverse rather than a new one every turn. */
+      {
+        M42Value *turned = solve_by_inverting (s, lhs, var);
+
+        if (turned != NULL && m42_value_list_length (turned) == 1)
+          {
+            const M42Value *pair = m42_value_list_nth (turned, 0);
+            const M42Value *rule = pair->kind == M42_VALUE_LIST
+                                     ? m42_value_list_nth (pair, 0) : pair;
+
+            if (rule->kind == M42_VALUE_EXPR && rule->u.expr->kind == M42_NODE_RULE)
+              {
+                M42Node *answer_node =
+                  is_it (M42_TOK_EQ, var,
+                         m42_node_copy (m42_node_child (rule->u.expr, 1)));
+
+                m42_value_unref (turned);
+                return expr_result (answer_node);
+              }
+          }
+        if (turned != NULL)
+          {
+            m42_value_unref (turned);
+            return m42_value_error ("Reduce: that has a solution every turn of the "
+                                    "wave, for ever; Solve names the principal ones");
+          }
+      }
+      return m42_value_error ("Reduce: no closed form for that one");
+    }
+
+  {
+    M42Value *answer = reduce_inequality (s, lhs, var, op);
+
+    if (answer != NULL)
+      return answer;
+  }
+  return m42_value_error ("Reduce: an inequality has to be a polynomial in the "
+                          "letter, with numbers for its coefficients");
+}
+
 /* --- the shape of a program ---------------------------------------------
  *
  * Mathematica writes its loops as functions -- For, While, Do -- and so
@@ -7077,6 +7703,126 @@ solve_by_inverting (M42Session *s, const M42Node *lhs, const char *var)
   }
 }
 
+/* The three roots of a x^3 + b x^2 + c x + d, in letters.  Cardano's
+ * formula, written the way it is usually written now:
+ *
+ *   D0 = b^2 - 3 a c
+ *   D1 = 2 b^3 - 9 a b c + 27 a^2 d
+ *   C  = ((D1 + Sqrt[D1^2 - 4 D0^3])/2)^(1/3)
+ *   x  = -(b + w C + D0/(w C))/(3 a),  w each cube root of one
+ *
+ * and the three cube roots of one are 1 and (-1 +- Sqrt[3] I)/2.  It
+ * is the answer Mathematica gives, and like Mathematica's it says
+ * nothing about which root is real: that is what N is for.
+ *
+ * When C is nothing -- a cubic with three equal roots -- the formula
+ * divides by nothing, so that case is left to the numbers. */
+static void
+cubic_roots (const M42Node *a, const M42Node *b, const M42Node *c, const M42Node *d,
+             M42Node *answers[3])
+{
+#define CP3(n)     m42_node_copy (n)
+#define NUM3(x)    m42_node_number (x)
+#define ADD3(x, y) m42_node_binary (M42_TOK_PLUS, (x), (y))
+#define SUB3(x, y) m42_node_binary (M42_TOK_MINUS, (x), (y))
+#define MUL3(x, y) m42_node_binary (M42_TOK_STAR, (x), (y))
+#define DIV3(x, y) m42_node_binary (M42_TOK_SLASH, (x), (y))
+#define POW3(x, y) m42_node_binary (M42_TOK_CARET, (x), (y))
+#define NEG3(x)    m42_node_unary (M42_TOK_MINUS, (x))
+
+  /* D0 = b^2 - 3 a c */
+  g_autoptr (M42Node) d0 = SUB3 (POW3 (CP3 (b), NUM3 (2)),
+                                 MUL3 (NUM3 (3), MUL3 (CP3 (a), CP3 (c))));
+  /* D1 = 2 b^3 - 9 a b c + 27 a^2 d */
+  g_autoptr (M42Node) d1 =
+    ADD3 (SUB3 (MUL3 (NUM3 (2), POW3 (CP3 (b), NUM3 (3))),
+                MUL3 (NUM3 (9), MUL3 (CP3 (a), MUL3 (CP3 (b), CP3 (c))))),
+          MUL3 (NUM3 (27), MUL3 (POW3 (CP3 (a), NUM3 (2)), CP3 (d))));
+  /* C = ((D1 + Sqrt[D1^2 - 4 D0^3])/2)^(1/3) */
+  g_autoptr (M42Node) under = SUB3 (POW3 (CP3 (d1), NUM3 (2)),
+                                    MUL3 (NUM3 (4), POW3 (CP3 (d0), NUM3 (3))));
+  g_autoptr (M42Node) big =
+    POW3 (DIV3 (ADD3 (CP3 (d1), m42_node_call1 ("Sqrt", g_steal_pointer (&under))),
+                NUM3 (2)),
+          DIV3 (NUM3 (1), NUM3 (3)));
+
+  for (int k = 0; k < 3; k++)
+    {
+      /* w = 1, (-1 + Sqrt[3] I)/2, (-1 - Sqrt[3] I)/2 */
+      M42Node *turned;
+
+      if (k == 0)
+        turned = CP3 (big);
+      else
+        {
+          M42Node *root3 = m42_node_call1 ("Sqrt", NUM3 (3));
+          M42Node *imaginary = MUL3 (root3, m42_node_ident ("I"));
+          M42Node *w = DIV3 (k == 1 ? ADD3 (NUM3 (-1), imaginary)
+                                    : SUB3 (NUM3 (-1), imaginary),
+                             NUM3 (2));
+
+          turned = MUL3 (w, CP3 (big));
+        }
+      {
+        M42Node *both = ADD3 (CP3 (turned), DIV3 (CP3 (d0), turned));
+        M42Node *whole = NEG3 (DIV3 (ADD3 (CP3 (b), both),
+                                     MUL3 (NUM3 (3), CP3 (a))));
+
+        answers[k] = m42_node_simplify (whole);
+        m42_node_free (whole);
+      }
+    }
+
+#undef CP3
+#undef NUM3
+#undef ADD3
+#undef SUB3
+#undef MUL3
+#undef DIV3
+#undef POW3
+#undef NEG3
+}
+
+/* Solve[eq, x, Modulus -> n]: which of the numbers below n satisfy the
+ * equation when the arithmetic wraps round.  There are only n of them
+ * to try, and trying them is the whole method -- what a first course
+ * in number theory does by hand, and what Mathematica answers with. */
+static M42Value *
+solve_to_modulus (M42Session *s, const M42Node *lhs, const char *var, gint64 modulus)
+{
+  M42Value *out = m42_value_list_new ();
+
+  if (modulus < 2 || modulus > 1000000)
+    {
+      m42_value_unref (out);
+      return m42_value_error ("Solve: the modulus has to be between 2 and a million");
+    }
+  for (gint64 k = 0; k < modulus; k++)
+    {
+      double y = number_at (s, lhs, var, (double) k);
+      double left;
+
+      if (!isfinite (y))
+        continue;
+      /* The value has to be a whole number for the wrapping to mean
+       * anything, and then it is nothing to the modulus or it is not. */
+      if (fabs (y - round (y)) > 1e-6)
+        continue;
+      left = fmod (round (y), (double) modulus);
+      if (fabs (left) < 0.5 || fabs (fabs (left) - modulus) < 0.5)
+        {
+          M42Node *rule = m42_node_new (M42_NODE_RULE);
+          M42Value *pair = m42_value_list_new ();
+
+          g_ptr_array_add (rule->children, m42_node_ident (var));
+          g_ptr_array_add (rule->children, m42_node_number ((double) k));
+          m42_value_list_append (pair, m42_value_expr (rule));
+          m42_value_list_append (out, pair);
+        }
+    }
+  return out;
+}
+
 static M42Value *
 solve (M42Session *s, const M42Node *call)
 {
@@ -7086,7 +7832,7 @@ solve (M42Session *s, const M42Node *call)
   double prev_x = -100, prev_f;
   GArray *roots = g_array_new (FALSE, FALSE, sizeof (double));
 
-  if (call->children->len != 2)
+  if (call->children->len < 2 || call->children->len > 3)
     return m42_value_error ("Solve expects an equation and a variable");
   f = m42_node_child (call, 0);
   spec = m42_node_child (call, 1);
@@ -7104,6 +7850,37 @@ solve (M42Session *s, const M42Node *call)
                            symbolic_argument (s, m42_node_child (f, 1), var));
   else
     lhs = symbolic_argument (s, f, var);
+
+  /* Modulus -> n after the letter: the arithmetic wraps round, and
+   * only the numbers below n can be answers. */
+  if (call->children->len == 3)
+    {
+      const M42Node *option = m42_node_child (call, 2);
+      double modulus;
+
+      if (option->kind != M42_NODE_RULE ||
+          m42_node_child (option, 0)->kind != M42_NODE_IDENT ||
+          strcmp (m42_node_child (option, 0)->name, "Modulus") != 0)
+        {
+          m42_value_unref (out);
+          g_array_unref (roots);
+          return m42_value_error ("Solve: the only thing that may follow the letter "
+                                  "is Modulus -> n");
+        }
+      {
+        g_autoptr (M42Value) how_big = eval (s, m42_node_child (option, 1));
+
+        if (!value_number (how_big, &modulus))
+          {
+            m42_value_unref (out);
+            g_array_unref (roots);
+            return m42_value_error ("Solve: the modulus has to be a whole number");
+          }
+      }
+      m42_value_unref (out);
+      g_array_unref (roots);
+      return solve_to_modulus (s, lhs, var, (gint64) modulus);
+    }
 
   /* A polynomial with numbers for coefficients gives up all its roots
    * at once. */
@@ -7176,9 +7953,9 @@ solve (M42Session *s, const M42Node *call)
   {
     g_autoptr (GPtrArray) terms = m42_node_poly_terms (lhs, var);
 
-    if (terms != NULL && (terms->len == 2 || terms->len == 3))
+    if (terms != NULL && terms->len >= 2 && terms->len <= 4)
       {
-        M42Node *answers[2] = { NULL, NULL };
+        M42Node *answers[3] = { NULL, NULL, NULL };
         guint how_many = 1;
 
         if (terms->len == 2)
@@ -7190,6 +7967,14 @@ solve (M42Session *s, const M42Node *call)
             answers[0] = m42_node_binary (M42_TOK_SLASH,
                                           m42_node_unary (M42_TOK_MINUS, m42_node_copy (b)),
                                           m42_node_copy (a));
+          }
+        else if (terms->len == 4)
+          {
+            /* a x^3 + b x^2 + c x + d == 0, by Cardano. */
+            cubic_roots (g_ptr_array_index (terms, 3), g_ptr_array_index (terms, 2),
+                         g_ptr_array_index (terms, 1), g_ptr_array_index (terms, 0),
+                         answers);
+            how_many = 3;
           }
         else
           {
@@ -12792,8 +13577,18 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
         {
           double x;
 
+          /* A letter is not known to be on either side of nothing, and
+           * saying it is not positive would be saying more than is
+           * known: the question is left standing, which is also what
+           * lets it be handed to Simplify as an assumption. */
           if (!value_number (v, &x))
-            return m42_value_number (0);
+            {
+              M42Node *asked = value_to_node (v);
+
+              if (asked == NULL)
+                return m42_value_number (0);
+              return expr_result (m42_node_call1 (name, asked));
+            }
           if (name_is (name, "Positive", NULL))     return m42_value_number (x > 0);
           if (name_is (name, "Negative", NULL))     return m42_value_number (x < 0);
           if (name_is (name, "NonNegative", NULL))  return m42_value_number (x >= 0);
@@ -14907,6 +15702,8 @@ eval_call (M42Session *s, const M42Node *n)
       return m42_value_expr (whole);
     }
 
+  if (name_is (name, "Reduce", NULL))
+    return reduce (s, n);
   if (name_is (name, "Solve", "NSolve"))
     {
       /* A list of equations and a list of unknowns is a system. */

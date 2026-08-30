@@ -572,6 +572,42 @@ m42_node_simplify (const M42Node *n)
 
 #define DROP_A() do { m42_node_free (a); return b; } while (0)
 #define DROP_B() do { m42_node_free (b); return a; } while (0)
+
+      /* And and Or, once one side is settled.  Reduce answers with a
+       * condition, and putting numbers into one leaves 1 && x == 3,
+       * which is x == 3 and should say so. */
+      if (op == M42_TOK_AND || op == M42_TOK_OR)
+        {
+          for (int side = 0; side < 2; side++)
+            {
+              M42Node *one = side == 0 ? a : b;
+              M42Node *other = side == 0 ? b : a;
+              gboolean settled = FALSE, holds = FALSE;
+
+              if (is_number (one))
+                {
+                  settled = TRUE;
+                  holds = one->number != 0;
+                }
+              else if (one->kind == M42_NODE_IDENT &&
+                       (strcmp (one->name, "True") == 0 ||
+                        strcmp (one->name, "False") == 0))
+                {
+                  settled = TRUE;
+                  holds = strcmp (one->name, "True") == 0;
+                }
+              if (!settled)
+                continue;
+              if ((op == M42_TOK_AND && holds) || (op == M42_TOK_OR && !holds))
+                {
+                  m42_node_free (one);
+                  return other;
+                }
+              m42_node_free (other);
+              return one;
+            }
+        }
+
       switch (op)
         {
         case M42_TOK_PLUS:

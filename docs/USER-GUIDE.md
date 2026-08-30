@@ -667,12 +667,16 @@ In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + 1/2 u^2 + 1/6 u^3 + 1/24
 | `Simplify[e]`, `FullSimplify[e]` | the identities, the cancelling and the multiplying out, whichever comes out shorter |
 | `Simplify[e, x > 0]`, `Refine[e, x > 0]` | with what may be assumed about a letter: `Simplify[Sqrt[x^2], x > 0]` is `x`, and `x < 0` makes it `-x`. The assumptions understood are the inequalities against nothing, singly, in a list, or joined with `&&` |
 | `Assuming[x > 0, body]` | the same assumption handed to every `Simplify`, `Refine` and `PowerExpand` inside the body |
+| `Element[x, Reals]`, `Element[n, Integers]` | what a letter is, rather than which side of nothing: a real number is its own conjugate and has nothing imaginary about it, and a whole number leaves `Floor` and `Round` where they were and makes `Sin[n Pi]` nothing and `Cos[n Pi]` `(-1)^n` |
 | `Cancel[e]` | a fraction with whatever divides both halves taken off |
 | `TrigReduce[e]` | products and powers of waves as a sum of plain waves: `Sin[x] Cos[x]` is `Sin[2 x]/2` |
 | `TrigExpand[e]` | the other way: `Sin[x + y]` is `Sin[x] Cos[y] + Cos[x] Sin[y]`, and `Sin[2 x]` is `2 Sin[x] Cos[x]` |
 | `TrigToExp[e]`, `ExpToTrig[e]` | waves as exponentials of an imaginary angle, and back |
 | `PowerExpand[e]` | `Log[a b]` as `Log[a] + Log[b]`, taking the letters for positive numbers |
 | `Solve[lhs == rhs, x]` | every root of a polynomial, complex ones included |
+| `Solve[a x^3 + b x^2 + c x + d == 0, x]` | a cubic with letters for coefficients, by Cardano: three roots, written with the cube roots of one |
+| `Solve[eq, x, Modulus -> n]` | the equation where the arithmetic wraps round: `Solve[3 x == 1, x, Modulus -> 7]` is `x -> 5` |
+| `Reduce[eq, x]` | the whole answer with its conditions: `a x + b == 0` is `a != 0 && x == -(b/a) \|\| a == 0 && b == 0`. An inequality gives the stretches of the line where it holds — `Reduce[x^2 - 4 > 0, x]` is `x < -2 \|\| x > 2` |
 | `Solve[Sin[x] == 1/2, x]` | a function of the unknown that has an inverse is turned round instead of scanned: `{{x -> Pi/6}, {x -> 5 Pi/6}}`. The waves repeat for ever, and these are the two the principal inverse gives; the rest are these plus whole turns |
 | `Roots[lhs == rhs, x]` | the same, written `x == a || x == b` |
 | `Variables[e]` | the letters in an expression |
@@ -1196,21 +1200,21 @@ Said plainly, so nothing surprises you:
   pattern for a sum of three terms has to be written as one. `|` is
   also MATLAB's or, and means one shape or the other only where a
   pattern is what was wanted.
-- **Symbolic solving.** `Solve` gives a closed form for a line and a
-  quadratic with letters for coefficients, turns round a function of
-  the unknown that has an inverse, and finds the rest of the roots
-  numerically — a cubic with letters in it is beyond it. `DSolve`
-  handles the linear equations: a first order one by its integrating
-  factor whatever its coefficients are, a second order one with
-  constant coefficients and anything on the right it can integrate
-  twice, and a first order one that separates into a power of `y`.
-  `RSolve` handles a linear recurrence with constant coefficients.
-  Beyond those there is no `Reduce`, no system of differential
-  equations, no partial differential equations, and no modular
-  arithmetic in an equation. `Assuming` and the second argument of
-  `Simplify` understand the inequalities against nothing — `x > 0`
-  and its three companions — and nothing else: there is no way to say
-  that a letter is real, or an integer, or lies between two numbers.
+- **Symbolic solving.** `Solve` gives a closed form for a line, a
+  quadratic and a cubic with letters for coefficients, turns round a
+  function of the unknown that has an inverse, solves an equation to a
+  modulus, and finds the rest of the roots numerically — a quartic
+  with letters in it is beyond it. `Reduce` gives the whole answer
+  with its conditions for an equation in one letter, and the stretches
+  of the line for an inequality with numbers for coefficients; a
+  system of them, or one in several letters, is beyond it, and so is
+  an inequality whose coefficients are letters. `DSolve` handles the
+  linear equations: a first order one by its integrating factor
+  whatever its coefficients are, a second order one with constant
+  coefficients and anything on the right it can integrate twice, and a
+  first order one that separates into a power of `y`. `RSolve` handles
+  a linear recurrence with constant coefficients. There are no partial
+  differential equations.
 - **Symbolic integration beyond the rules listed above.** The special
   functions that are there — `Gamma`, `Beta`, `Erf`, `Erfc`, `Zeta`,
   `BesselJ`, `BesselY`, `LegendreP`, `HermiteH` — are numeric, and

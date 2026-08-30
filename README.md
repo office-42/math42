@@ -61,6 +61,13 @@ comes back unchanged. `Import` and `Export` — `load` and `save` under
 MATLAB's spelling — carry matrices in and out through MATLAB's own
 `.mat` files, compressed or not, as well as CSV.
 
+**Solving.** `Solve` gives the closed form for a line, a quadratic
+and a cubic with letters for coefficients, turns `Sin[x] == 1/2` round
+into `Pi/6`, and takes `Modulus -> n`. `Reduce` gives the whole answer
+with its conditions — `a x + b == 0` is
+`a != 0 && x == -(b/a) || a == 0 && b == 0` — and the stretches of the
+line where an inequality holds.
+
 **Discrete mathematics.** `HarmonicNumber`, `PartitionsP`, `MoebiusMu`,
 `JacobiSymbol`, `ContinuedFraction`, `PolyGamma`,
 `PowerMod`, `ExtendedGCD`, `ChineseRemainder`,
