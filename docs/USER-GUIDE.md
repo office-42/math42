@@ -904,6 +904,23 @@ list is a MATLAB matrix and the two spellings collide.
 `Prime`, `Fibonacci`, `RandomReal`/`rand`, `RandomInteger`/`randi`,
 `randn`, `Chop`.
 
+The functions an integral runs into are here too, since
+`Integrate[Exp[x^2], x]` has no elementary answer and something has to
+be said: `Erfi` (the error function of an imaginary argument, made
+real), `SinIntegral` and `CosIntegral`, `ExpIntegralEi`,
+`LogIntegral`, `FresnelS` and `FresnelC`, and the Airy pair `AiryAi`
+and `AiryBi` with their derivatives `AiryAiPrime` and `AiryBiPrime`.
+Each is a number to whatever a double holds, and each is what
+something differentiates back into:
+
+```
+In[i1]:= Integrate[Exp[x^2], x]    Out[i1]= Sqrt[Pi] Erfi[x]/2
+In[i2]:= Integrate[Sin[x]/x, x]    Out[i2]= SinIntegral[x]
+In[i3]:= Integrate[Sin[x^2], x]    Out[i3]= Sqrt[Pi/2] FresnelS[Sqrt[2/Pi] x]
+In[i4]:= Integrate[Exp[x]/x, x]    Out[i4]= ExpIntegralEi[x]
+In[i5]:= D[AiryAi[x], x, x]        Out[i5]= x AiryAi[x]
+```
+
 The functions of one number are `Sin`, `Cos`, `Tan`, `Cot`, `Sec`,
 `Csc`, `ArcSin`, `ArcCos`, `ArcTan`, `Sinh`, `Cosh`, `Tanh`, `Exp`,
 `Log`, `Log10`, `Log2`, `Sqrt` and `Abs`, each of them under its MATLAB
@@ -1221,12 +1238,14 @@ Said plainly, so nothing surprises you:
   differential equations, and a system of more than two, or one whose
   coefficients are letters, is beyond it.
 - **Symbolic integration beyond the rules listed above.** The special
-  functions that are there — `Gamma`, `Beta`, `Erf`, `Erfc`, `Zeta`,
-  `BesselJ`, `BesselY`, `LegendreP`, `HermiteH` — are numeric, and
-  nothing integrates or differentiates into them but the Gaussian,
-  which comes out as `Erf`. There is no `Erfi`, no `SinIntegral`, no
-  Airy: `Integrate[Exp[x^2], x]` and `Integrate[Sin[x]/x, x]` have no
-  answer here to give.
+  functions are numeric, but the ones an integral runs into are
+  integrated and differentiated as well: `Exp[x^2]` gives `Erfi`,
+  `Sin[x]/x` gives `SinIntegral`, `Cos[x]/x` `CosIntegral`, `Exp[x]/x`
+  `ExpIntegralEi`, `1/Log[x]` `LogIntegral`, and `Sin[x^2]` and
+  `Cos[x^2]` the two of Fresnel, and the Airy pair solves `y'' == x y`.
+  What is missing is everything else: an integral outside the rules
+  listed above is left standing rather than answered with a function
+  nobody has heard of, and there is no Meijer G to fall back on.
 - **Symbolic transforms beyond the table**: the Laplace pair works from
   the table a course hands out, and the Fourier series is worked out by
   quadrature rather than symbolically.

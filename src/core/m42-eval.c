@@ -423,6 +423,332 @@ m42_zeta (double s)
   return eta / (1 - pow (2, 1 - s));
 }
 
+/* --- the functions an integral runs into --------------------------------
+ *
+ * Integrate[Exp[x^2], x] has no answer in the elementary functions, and
+ * neither has Integrate[Sin[x]/x, x].  Mathematica answers with the
+ * functions that were invented for exactly those integrals, and so does
+ * math42 now: the imaginary error function, the sine and cosine
+ * integrals, the exponential integral, the two Fresnel integrals, and
+ * the pair of Airy functions.  Each of them is here as a number to
+ * whatever a double holds -- an ascending series near nothing, an
+ * asymptotic form far out -- and each of them is what something
+ * differentiates back into, so that the derivative of the integral is
+ * the integrand again.
+ */
+
+/* Erfi[x] = -I Erf[I x], which for a real x is real: the same integral
+ * as Erf but of Exp[+t^2].  The series is exact near nothing and the
+ * asymptotic form takes over where it would overflow. */
+static double
+m42_erfi (double x)
+{
+  double magnitude = fabs (x);
+
+  if (magnitude < 6)
+    {
+      /* 2/Sqrt[Pi] sum x^(2k+1)/(k! (2k+1)) */
+      double term = x, sum = x;
+
+      for (int k = 1; k < 200; k++)
+        {
+          term *= x * x / k;
+          sum += term / (2 * k + 1);
+          if (fabs (term / (2 * k + 1)) < 1e-17 * fabs (sum))
+            break;
+        }
+      return 2 / sqrt (G_PI) * sum;
+    }
+  {
+    /* Exp[x^2]/(x Sqrt[Pi]) (1 + 1/(2x^2) + 3/(4x^4) + ...) */
+    double square = x * x, term = 1, sum = 1;
+
+    for (int k = 1; k < 12; k++)
+      {
+        term *= (2 * k - 1) / (2 * square);
+        sum += term;
+      }
+    return exp (square) / (x * sqrt (G_PI)) * sum;
+  }
+}
+
+/* Si[x] = integral of Sin[t]/t from 0 to x. */
+static double
+m42_sin_integral (double x)
+{
+  double magnitude = fabs (x);
+
+  if (magnitude < 16)
+    {
+      /* sum (-1)^k x^(2k+1)/((2k+1) (2k+1)!) */
+      double term = x, sum = x;
+      double sign = -1;
+
+      for (int k = 1; k < 400; k++)
+        {
+          term *= x * x / ((2.0 * k) * (2 * k + 1));
+          sum += sign * term / (2 * k + 1);
+          sign = -sign;
+          if (fabs (term / (2 * k + 1)) < 1e-17 * fabs (sum))
+            break;
+        }
+      return sum;
+    }
+  {
+    /* Pi/2 - Cos[x] f(x)/x - Sin[x] g(x)/x^2, with f and g the usual
+     * asymptotic series. */
+    double square = x * x;
+    double f = 1 - 2 / square + 24 / (square * square) - 720 / (square * square * square);
+    double g = 1 - 6 / square + 120 / (square * square) - 5040 / (square * square * square);
+
+    return copysign (G_PI / 2, x) - cos (x) * f / x - sin (x) * g / square;
+  }
+}
+
+/* Ci[x] = -integral of Cos[t]/t from x to infinity, for x above
+ * nothing.  Below it the function is complex, and math42 says so by
+ * giving nothing back. */
+static double
+m42_cos_integral (double x)
+{
+  const double euler = 0.577215664901532860606512;
+
+  if (x < 0)
+    return NAN;
+  if (x == 0)
+    return -INFINITY;
+  if (x < 16)
+    {
+      /* EulerGamma + Log[x] + sum (-1)^k x^(2k)/(2k (2k)!) */
+      double term = 1, sum = 0;
+      double sign = -1;
+
+      for (int k = 1; k < 400; k++)
+        {
+          term *= x * x / ((2.0 * k - 1) * (2.0 * k));
+          sum += sign * term / (2 * k);
+          sign = -sign;
+          if (fabs (term / (2 * k)) < 1e-17 * (fabs (sum) + 1))
+            break;
+        }
+      return euler + log (x) + sum;
+    }
+  {
+    double square = x * x;
+    double f = 1 - 2 / square + 24 / (square * square) - 720 / (square * square * square);
+    double g = 1 - 6 / square + 120 / (square * square) - 5040 / (square * square * square);
+
+    return sin (x) * f / x - cos (x) * g / square;
+  }
+}
+
+/* Ei[x], the exponential integral: the principal value of the integral
+ * of Exp[t]/t up to x. */
+static double
+m42_exp_integral_ei (double x)
+{
+  const double euler = 0.577215664901532860606512;
+
+  if (x == 0)
+    return -INFINITY;
+  if (fabs (x) < 40)
+    {
+      double term = 1, sum = 0;
+
+      for (int k = 1; k < 500; k++)
+        {
+          term *= x / k;
+          sum += term / k;
+          if (fabs (term / k) < 1e-17 * (fabs (sum) + 1))
+            break;
+        }
+      return euler + log (fabs (x)) + sum;
+    }
+  {
+    /* Exp[x]/x (1 + 1!/x + 2!/x^2 + ...), cut where the terms turn. */
+    double term = 1, sum = 1;
+
+    for (int k = 1; k < 20; k++)
+      {
+        double next = term * k / x;
+
+        if (fabs (next) > fabs (term))
+          break;
+        term = next;
+        sum += term;
+      }
+    return exp (x) / x * sum;
+  }
+}
+
+/* The Fresnel pair, as Mathematica scales them:
+ * S[x] = integral of Sin[Pi t^2/2], C[x] = integral of Cos[Pi t^2/2]. */
+static double
+m42_fresnel (double x, gboolean sine)
+{
+  double magnitude = fabs (x);
+
+  if (magnitude < 4.5)
+    {
+      double half_pi = G_PI / 2;
+      double term = x, sum = 0;
+      double sign = 1;
+
+      if (sine)
+        {
+          /* sum (-1)^k (Pi/2)^(2k+1) x^(4k+3)/((2k+1)! (4k+3)) */
+          term = half_pi * x * x * x;
+          for (int k = 0; k < 200; k++)
+            {
+              sum += sign * term / (4 * k + 3);
+              term *= half_pi * half_pi * x * x * x * x / ((2.0 * k + 2) * (2 * k + 3));
+              sign = -sign;
+              if (fabs (term) < 1e-18)
+                break;
+            }
+          return sum;
+        }
+      /* sum (-1)^k (Pi/2)^(2k) x^(4k+1)/((2k)! (4k+1)) */
+      term = x;
+      for (int k = 0; k < 200; k++)
+        {
+          sum += sign * term / (4 * k + 1);
+          term *= half_pi * half_pi * x * x * x * x / ((2.0 * k + 1) * (2 * k + 2));
+          sign = -sign;
+          if (fabs (term) < 1e-18)
+            break;
+        }
+      return sum;
+    }
+  {
+    /* Half, less the wave that dies away. */
+    double square = G_PI * x * x / 2;
+    double f = 1 / (G_PI * magnitude);
+    double g = 1 / (G_PI * G_PI * magnitude * magnitude * magnitude);
+    double value = sine ? 0.5 - f * cos (square) - g * sin (square)
+                        : 0.5 + f * sin (square) - g * cos (square);
+
+    return copysign (value, x);
+  }
+}
+
+/* The Airy pair, from the Bessel functions of order a third, which is
+ * how they are defined. */
+static double
+m42_airy (double x, gboolean second_kind)
+{
+  double magnitude = fabs (x);
+  double root = sqrt (magnitude);
+  double zeta = 2.0 / 3.0 * magnitude * root;
+
+  if (magnitude < 1e-12)
+    return second_kind ? 0.614926627446000735 : 0.355028053887817239;
+  if (x > 0)
+    {
+      double k_third = bessel_k (1.0 / 3.0, zeta);
+      double i_third = bessel_i (1.0 / 3.0, zeta);
+      double i_minus = bessel_i (-1.0 / 3.0, zeta);
+
+      if (second_kind)
+        return root / sqrt (3.0) * (i_minus + i_third);
+      return root / (G_PI * sqrt (3.0)) * k_third;
+    }
+  {
+    double j_third = bessel_j (1.0 / 3.0, zeta);
+    double j_minus = bessel_j (-1.0 / 3.0, zeta);
+
+    if (second_kind)
+      return root / sqrt (3.0) * (j_minus - j_third);
+    return root / 3.0 * (j_minus + j_third);
+  }
+}
+
+static double
+m42_airy_ai (double x)
+{
+  return m42_airy (x, FALSE);
+}
+
+static double
+m42_airy_bi (double x)
+{
+  return m42_airy (x, TRUE);
+}
+
+/* Their derivatives, by the same route. */
+static double
+m42_airy_prime (double x, gboolean second_kind)
+{
+  double magnitude = fabs (x);
+  double zeta = 2.0 / 3.0 * magnitude * sqrt (magnitude);
+
+  if (magnitude < 1e-12)
+    return second_kind ? 0.448288357353826356 : -0.258819403792806798;
+  if (x > 0)
+    {
+      double k_two = bessel_k (2.0 / 3.0, zeta);
+      double i_two = bessel_i (2.0 / 3.0, zeta);
+      double i_minus = bessel_i (-2.0 / 3.0, zeta);
+
+      if (second_kind)
+        return magnitude / sqrt (3.0) * (i_minus + i_two);
+      return -magnitude / (G_PI * sqrt (3.0)) * k_two;
+    }
+  {
+    double j_two = bessel_j (2.0 / 3.0, zeta);
+    double j_minus = bessel_j (-2.0 / 3.0, zeta);
+
+    if (second_kind)
+      return magnitude / sqrt (3.0) * (j_minus + j_two);
+    return magnitude / 3.0 * (j_two - j_minus);
+  }
+}
+
+static double
+m42_airy_ai_prime (double x)
+{
+  return m42_airy_prime (x, FALSE);
+}
+
+static double
+m42_airy_bi_prime (double x)
+{
+  return m42_airy_prime (x, TRUE);
+}
+
+static double
+m42_si (double x)
+{
+  return m42_sin_integral (x);
+}
+
+static double
+m42_ci (double x)
+{
+  return m42_cos_integral (x);
+}
+
+static double
+m42_fresnel_s (double x)
+{
+  return m42_fresnel (x, TRUE);
+}
+
+static double
+m42_fresnel_c (double x)
+{
+  return m42_fresnel (x, FALSE);
+}
+
+/* Li[x] = Ei[Log[x]], the logarithmic integral. */
+static double
+m42_log_integral (double x)
+{
+  if (x <= 0 || x == 1)
+    return x == 1 ? -INFINITY : NAN;
+  return m42_exp_integral_ei (log (x));
+}
+
 static double m42_cot (double x) { return 1.0 / tan (x); }
 static double m42_sec (double x) { return 1.0 / cos (x); }
 static double m42_csc (double x) { return 1.0 / sin (x); }
@@ -470,6 +796,25 @@ static const struct {
   { "erfcinv", "InverseErfc", m42_inverse_erfc },
   { "LogGamma", "LogGamma", lgamma }, { "gammaln", "LogGamma", lgamma },
   { "Zeta", "Zeta", m42_zeta }, { "zeta", "Zeta", m42_zeta },
+  /* The ones an integral runs into.  Mathematica's spellings, and
+   * MATLAB's where MATLAB has one. */
+  { "Erfi", "Erfi", m42_erfi },  { "erfi", "Erfi", m42_erfi },
+  { "SinIntegral", "SinIntegral", m42_si },
+  { "sinint", "SinIntegral", m42_si },
+  { "CosIntegral", "CosIntegral", m42_ci },
+  { "cosint", "CosIntegral", m42_ci },
+  /* Not expint: MATLAB's expint is E1, which is -Ei(-x) and a
+   * different function. */
+  { "ExpIntegralEi", "ExpIntegralEi", m42_exp_integral_ei },
+  { "LogIntegral", "LogIntegral", m42_log_integral },
+  { "FresnelS", "FresnelS", m42_fresnel_s },
+  { "FresnelC", "FresnelC", m42_fresnel_c },
+  /* Not airy: MATLAB's airy takes a number first to say which of the
+   * four it wants. */
+  { "AiryAi", "AiryAi", m42_airy_ai },
+  { "AiryBi", "AiryBi", m42_airy_bi },
+  { "AiryAiPrime", "AiryAiPrime", m42_airy_ai_prime },
+  { "AiryBiPrime", "AiryBiPrime", m42_airy_bi_prime },
 };
 
 /* --- helpers ----------------------------------------------------------- */

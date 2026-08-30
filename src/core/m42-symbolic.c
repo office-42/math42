@@ -1319,6 +1319,35 @@ derivative_of_function (const char *f, const M42Node *u)
   if (!strcmp (f, "Erfc") || !strcmp (f, "erfc"))
     return NEG (DIV (MUL (NUM (2), CALL ("Exp", NEG (POW (CP (u), NUM (2))))),
                      CALL ("Sqrt", m42_node_ident ("Pi"))));
+  /* The functions that were invented to be the integrals of these:
+   * each of them differentiates back into what it came from, which is
+   * what makes D[Integrate[f, x], x] the integrand again. */
+  if (!strcmp (f, "Erfi") || !strcmp (f, "erfi"))
+    return DIV (MUL (NUM (2), CALL ("Exp", POW (CP (u), NUM (2)))),
+                CALL ("Sqrt", m42_node_ident ("Pi")));
+  if (!strcmp (f, "SinIntegral") || !strcmp (f, "sinint"))
+    return DIV (CALL ("Sin", CP (u)), CP (u));
+  if (!strcmp (f, "CosIntegral") || !strcmp (f, "cosint"))
+    return DIV (CALL ("Cos", CP (u)), CP (u));
+  if (!strcmp (f, "ExpIntegralEi") || !strcmp (f, "expint"))
+    return DIV (CALL ("Exp", CP (u)), CP (u));
+  if (!strcmp (f, "LogIntegral"))
+    return DIV (NUM (1), CALL ("Log", CP (u)));
+  if (!strcmp (f, "FresnelS"))
+    return CALL ("Sin", DIV (MUL (m42_node_ident ("Pi"), POW (CP (u), NUM (2))),
+                             NUM (2)));
+  if (!strcmp (f, "FresnelC"))
+    return CALL ("Cos", DIV (MUL (m42_node_ident ("Pi"), POW (CP (u), NUM (2))),
+                             NUM (2)));
+  if (!strcmp (f, "AiryAi") || !strcmp (f, "airy"))
+    return CALL ("AiryAiPrime", CP (u));
+  if (!strcmp (f, "AiryBi"))
+    return CALL ("AiryBiPrime", CP (u));
+  /* Ai'' = x Ai is what makes them Airy's functions at all. */
+  if (!strcmp (f, "AiryAiPrime"))
+    return MUL (CP (u), CALL ("AiryAi", CP (u)));
+  if (!strcmp (f, "AiryBiPrime"))
+    return MUL (CP (u), CALL ("AiryBi", CP (u)));
   return NULL;
 }
 
@@ -1675,6 +1704,21 @@ integrate_call (const M42Node *n, const char *var)
     return over_a (ADD (MUL (CP (u), CALL ("Erf", CP (u))),
                         DIV (CALL ("Exp", NEG (POW (CP (u), NUM (2)))),
                              CALL ("Sqrt", m42_node_ident ("Pi")))), a);
+  /* And the ones that were invented to be integrals, integrated once
+   * more -- each by parts, since each has a tidy derivative. */
+  if (!strcmp (f, "Erfi") || !strcmp (f, "erfi"))
+    return over_a (SUB (MUL (CP (u), CALL ("Erfi", CP (u))),
+                        DIV (CALL ("Exp", POW (CP (u), NUM (2))),
+                             CALL ("Sqrt", m42_node_ident ("Pi")))), a);
+  if (!strcmp (f, "SinIntegral") || !strcmp (f, "sinint"))
+    return over_a (ADD (MUL (CP (u), CALL ("SinIntegral", CP (u))),
+                        CALL ("Cos", CP (u))), a);
+  if (!strcmp (f, "CosIntegral") || !strcmp (f, "cosint"))
+    return over_a (SUB (MUL (CP (u), CALL ("CosIntegral", CP (u))),
+                        CALL ("Sin", CP (u))), a);
+  if (!strcmp (f, "ExpIntegralEi") || !strcmp (f, "expint"))
+    return over_a (SUB (MUL (CP (u), CALL ("ExpIntegralEi", CP (u))),
+                        CALL ("Exp", CP (u))), a);
   return NULL;
 }
 
@@ -2746,6 +2790,84 @@ integrate_node (const M42Node *n, const char *var, int depth)
   if (!m42_node_depends_on (n, var))
     return MUL (CP (n), m42_node_ident (var));
 
+  /* The integrals a table has no elementary answer for, and the
+   * functions that were invented to be them: Sin[x]/x is the sine
+   * integral, Cos[x]/x the cosine integral, Exp[x]/x the exponential
+   * integral, 1/Log[x] the logarithmic integral, and Sin[x^2] and
+   * Cos[x^2] the two of Fresnel.  Each is written with whatever
+   * multiple of x stands inside it, since that much comes out by
+   * substitution. */
+  if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_SLASH)
+    {
+      const M42Node *top = m42_node_child (n, 0);
+      const M42Node *bottom = m42_node_child (n, 1);
+      double slope, shift;
+
+      /* Something over x itself. */
+      if (bottom->kind == M42_NODE_IDENT && strcmp (bottom->name, var) == 0 &&
+          top->kind == M42_NODE_CALL && top->children->len == 1 &&
+          linear_coeffs (m42_node_child (top, 0), var, &slope, &shift) &&
+          fabs (shift) < 1e-14 && fabs (slope) > 1e-14)
+        {
+          const char *f = top->name;
+          M42Node *inside = CP (m42_node_child (top, 0));
+
+          if (!strcmp (f, "Sin") || !strcmp (f, "sin"))
+            return CALL ("SinIntegral", inside);
+          if (!strcmp (f, "Exp") || !strcmp (f, "exp"))
+            return CALL ("ExpIntegralEi", inside);
+          if (!strcmp (f, "Cos") || !strcmp (f, "cos"))
+            {
+              /* INT Cos[a x]/x = CosIntegral[a x], up to the constant
+               * that the logarithm of a carries. */
+              return CALL ("CosIntegral", inside);
+            }
+          m42_node_free (inside);
+        }
+      /* One over a logarithm. */
+      if (top->kind == M42_NODE_NUMBER && top->number == 1 &&
+          bottom->kind == M42_NODE_CALL && bottom->children->len == 1 &&
+          (!strcmp (bottom->name, "Log") || !strcmp (bottom->name, "log")) &&
+          m42_node_child (bottom, 0)->kind == M42_NODE_IDENT &&
+          strcmp (m42_node_child (bottom, 0)->name, var) == 0)
+        return CALL ("LogIntegral", m42_node_ident (var));
+    }
+
+  /* Sin[a x^2] and Cos[a x^2], which Fresnel's integrals answer. */
+  if (n->kind == M42_NODE_CALL && n->children->len == 1 &&
+      (!strcmp (n->name, "Sin") || !strcmp (n->name, "sin") ||
+       !strcmp (n->name, "Cos") || !strcmp (n->name, "cos")))
+    {
+      const M42Node *inside = m42_node_child (n, 0);
+      GArray *coefficients = g_array_new (FALSE, FALSE, sizeof (double));
+      M42Node *answer = NULL;
+
+      if (m42_node_polynomial (inside, var, coefficients) && coefficients->len == 3 &&
+          fabs (g_array_index (coefficients, double, 0)) < 1e-14 &&
+          fabs (g_array_index (coefficients, double, 1)) < 1e-14)
+        {
+          double a = g_array_index (coefficients, double, 2);
+          gboolean is_sine = n->name[0] == 'S' || n->name[0] == 's';
+
+          if (a > 0)
+            {
+              /* INT Sin[a x^2] dx = Sqrt[Pi/(2a)] FresnelS[Sqrt[2a/Pi] x],
+               * written with the roots rather than their decimals. */
+              M42Node *outside =
+                CALL ("Sqrt", DIV (m42_node_ident ("Pi"), NUM (2 * a)));
+              M42Node *inner =
+                CALL ("Sqrt", DIV (NUM (2 * a), m42_node_ident ("Pi")));
+              M42Node *argument = MUL (inner, m42_node_ident (var));
+
+              answer = MUL (outside,
+                            CALL (is_sine ? "FresnelS" : "FresnelC", argument));
+            }
+        }
+      g_array_free (coefficients, TRUE);
+      if (answer != NULL)
+        return answer;
+    }
+
   /* The Gaussian: INT e^(A x^2 + B x + C) dx, which is what the error
    * function is for.  Completing the square turns it into
    *   e^(C + B^2/4a) sqrt(pi/a)/2 Erf(sqrt(a) (x - B/2a)),  a = -A > 0,
@@ -2773,6 +2895,20 @@ integrate_node (const M42Node *n, const char *var, int depth)
                                  DIV (CALL ("Sqrt", DIV (m42_node_ident ("Pi"), NUM (a))),
                                       NUM (2))),
                             CALL ("Erf", MUL (NUM (sqrt (a)), shifted)));
+            }
+          /* The other way up -- e^(+x^2) -- is the same integral with
+           * the imaginary error function in place of the real one.
+           * Erfi is what Integrate[Exp[x^2], x] is for. */
+          else if (a < 0)
+            {
+              double up = -a;
+              M42Node *shifted = ADD (m42_node_ident (var), NUM (b / (2 * up)));
+
+              answer = MUL (MUL (NUM (exp (c - b * b / (4 * up))),
+                                 DIV (CALL ("Sqrt", DIV (m42_node_ident ("Pi"),
+                                                         NUM (up))),
+                                      NUM (2))),
+                            CALL ("Erfi", MUL (NUM (sqrt (up)), shifted)));
             }
         }
       g_array_free (coefficients, TRUE);
