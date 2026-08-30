@@ -477,7 +477,7 @@ spelling. Where two names are given, either will do.
 |---|---|
 | `D[f, x]`, `D[f, {x, n}]` | the derivative, to any order |
 | `D[f, x, y]` | the mixed partial, one variable after the other |
-| `Integrate[f, x]` | the antiderivative |
+| `Integrate[f, x]` | the antiderivative. A letter inside a function is no obstacle: `Integrate[Sin[a x], x]` is `-(Cos[a x]/a)` and `Integrate[Sqrt[a x + b], x]` is `2 (a x + b)^(3/2)/(3 a)` |
 | `Integrate[f, {x, a, b}]` | between bounds: exact if it can be, Simpson's rule if not |
 | `NIntegrate[f, {x, a, b}]` | always numeric |
 | `Limit[f, x -> a]` | including `x -> Infinity`; found numerically, and written as the constant when it is one — `Limit[(1 + 1/n)^n, n -> Infinity]` is `E` |
