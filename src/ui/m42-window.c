@@ -98,6 +98,13 @@ action_evaluate (GSimpleAction *action, GVariant *param, gpointer data)
   if (text[0] == '\0')
     return;
   evaluate_line (self, text);
+  /* On to the history, for the up arrow to find; nothing ever put a
+   * line there before, and the arrows did nothing. */
+  if (self->history->len == 0 ||
+      strcmp (g_ptr_array_index (self->history, self->history->len - 1), text) != 0)
+    g_ptr_array_add (self->history, g_strdup (text));
+  self->history_pos = self->history->len;
+  g_clear_pointer (&self->draft, g_free);
   gtk_editable_set_text (GTK_EDITABLE (self->entry), "");
 }
 
@@ -158,13 +165,16 @@ action_close (GSimpleAction *action, GVariant *param, gpointer data)
   gtk_window_close (GTK_WINDOW (data));
 }
 
+/* A file dialog answers after the window may have been closed: each
+ * holds a reference to the window until it does, and a window whose
+ * session is gone is left alone. */
 static void
 open_done (GObject *source, GAsyncResult *result, gpointer data)
 {
-  M42Window *self = data;
+  g_autoptr (M42Window) self = data;
   g_autoptr (GFile) file = gtk_file_dialog_open_finish (GTK_FILE_DIALOG (source), result, NULL);
 
-  if (file != NULL)
+  if (file != NULL && self->session != NULL)
     m42_window_open_file (self, file);
 }
 
@@ -212,7 +222,7 @@ action_open (GSimpleAction *action, GVariant *param, gpointer data)
 
   gtk_file_dialog_set_title (dialog, "Open Notebook");
   gtk_file_dialog_set_filters (dialog, filters);
-  gtk_file_dialog_open (dialog, GTK_WINDOW (data), NULL, open_done, data);
+  gtk_file_dialog_open (dialog, GTK_WINDOW (data), NULL, open_done, g_object_ref (data));
   g_object_unref (dialog);
 }
 
@@ -242,10 +252,11 @@ save_to (M42Window *self, GFile *file)
 static void
 save_done (GObject *source, GAsyncResult *result, gpointer data)
 {
+  g_autoptr (M42Window) self = data;
   g_autoptr (GFile) file = gtk_file_dialog_save_finish (GTK_FILE_DIALOG (source), result, NULL);
 
-  if (file != NULL)
-    save_to (M42_WINDOW (data), file);
+  if (file != NULL && self->session != NULL)
+    save_to (self, file);
 }
 
 static void
@@ -259,7 +270,7 @@ action_save_as (GSimpleAction *action, GVariant *param, gpointer data)
   /* The ending chooses the format: .m writes a MATLAB script, .nb a
    * Mathematica notebook, .wl a Wolfram one. */
   gtk_file_dialog_set_filters (dialog, filters);
-  gtk_file_dialog_save (dialog, GTK_WINDOW (data), NULL, save_done, data);
+  gtk_file_dialog_save (dialog, GTK_WINDOW (data), NULL, save_done, g_object_ref (data));
   g_object_unref (dialog);
 }
 
@@ -287,12 +298,12 @@ paper_title (M42Window *self)
 static void
 export_pdf_done (GObject *source, GAsyncResult *result, gpointer data)
 {
-  M42Window *self = data;
+  g_autoptr (M42Window) self = data;
   g_autoptr (GFile) file = gtk_file_dialog_save_finish (GTK_FILE_DIALOG (source), result, NULL);
   g_autoptr (GError) error = NULL;
   g_autofree char *path = NULL;
 
-  if (file == NULL)
+  if (file == NULL || self->session == NULL)
     return;
   path = g_file_get_path (file);
   if (path == NULL)
@@ -330,7 +341,7 @@ action_export_pdf (GSimpleAction *action, GVariant *param, gpointer data)
 
   gtk_file_dialog_set_title (dialog, "Export Notebook as PDF");
   gtk_file_dialog_set_initial_name (dialog, "notebook.pdf");
-  gtk_file_dialog_save (dialog, GTK_WINDOW (data), NULL, export_pdf_done, data);
+  gtk_file_dialog_save (dialog, GTK_WINDOW (data), NULL, export_pdf_done, g_object_ref (data));
   g_object_unref (dialog);
 }
 
@@ -683,7 +694,8 @@ m42_window_open_file (M42Window *self, GFile *file)
     }
 
   m42_notebook_clear (M42_NOTEBOOK (self->notebook));
-  m42_session_clear (self->session);
+  /* The page starts over at In[1], as the file's did. */
+  m42_session_restart (self->session);
   {
     /* A MATLAB script, a Wolfram one or a Mathematica notebook becomes
      * a list of inputs first; a .m42 file already is one. */

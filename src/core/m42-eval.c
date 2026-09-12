@@ -26,6 +26,7 @@
 #include "m42-pattern.h"
 
 #include <complex.h>
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,14 @@ m42_session_clear (M42Session *s)
 {
   g_hash_table_remove_all (s->globals);
   g_clear_pointer (&s->last, m42_value_unref);
+}
+
+void
+m42_session_restart (M42Session *s)
+{
+  m42_session_clear (s);
+  g_hash_table_remove_all (s->defined);
+  s->line = 1;
 }
 
 int
@@ -752,6 +761,9 @@ m42_log_integral (double x)
 static double m42_cot (double x) { return 1.0 / tan (x); }
 static double m42_sec (double x) { return 1.0 / cos (x); }
 static double m42_csc (double x) { return 1.0 / sin (x); }
+static double m42_coth (double x) { return 1.0 / tanh (x); }
+static double m42_sech (double x) { return 1.0 / cosh (x); }
+static double m42_csch (double x) { return 1.0 / sinh (x); }
 static double m42_sign (double x) { return x > 0 ? 1.0 : x < 0 ? -1.0 : 0.0; }
 static double m42_not (double x) { return x == 0 ? 1.0 : 0.0; }
 
@@ -775,6 +787,9 @@ static const struct {
   { "Sinh", "Sinh", sinh },     { "sinh", "Sinh", sinh },
   { "Cosh", "Cosh", cosh },     { "cosh", "Cosh", cosh },
   { "Tanh", "Tanh", tanh },     { "tanh", "Tanh", tanh },
+  { "Coth", "Coth", m42_coth }, { "coth", "Coth", m42_coth },
+  { "Sech", "Sech", m42_sech }, { "sech", "Sech", m42_sech },
+  { "Csch", "Csch", m42_csch }, { "csch", "Csch", m42_csch },
   { "Exp", "Exp", exp },        { "exp", "Exp", exp },
   { "Log", "Log", log },        { "log", "Log", log },
   { "Log10", "Log10", log10 },  { "log10", "Log10", log10 },
@@ -1770,8 +1785,10 @@ big_op (int op, const M42Value *a, const M42Value *b)
         if (!m42_big_fits_int64 (y, &divisor) || divisor == 0)
           return NULL;
         quotient = m42_big_divide_small (x, divisor, &remainder);
+        /* The remainder is a whole number and is kept as one: past
+         * 2^53 the double it was made into lost its last digit. */
         if (op == M42_TOK_PERCENT)
-          return m42_value_number ((double) remainder);
+          return m42_value_exact_int (remainder);
         if (remainder != 0)
           return NULL;              /* not a whole answer: the doubles take it */
         return m42_value_bigint (m42_big_copy (quotient));
@@ -3073,8 +3090,861 @@ limit (M42Session *s, const M42Node *call)
   }
 }
 
-/* Series[f, {x, a, n}]: the Taylor polynomial, its coefficients found
- * by differentiating symbolically and evaluating at a. */
+/* Every Sqrt[u] in a tree rewritten in place as u^(1/2), and every
+ * a/b whose bottom is not a plain number as a b^(-1), so that the
+ * power rule does the differentiating rather than the quotient rule,
+ * which squares the bottom every time it is applied. */
+static void
+roots_as_powers (M42Node *n)
+{
+  if (n == NULL || n->children == NULL)
+    return;
+  for (guint i = 0; i < n->children->len; i++)
+    roots_as_powers (g_ptr_array_index (n->children, i));
+  if (n->kind == M42_NODE_CALL && n->children->len == 1 &&
+      (strcmp (n->name, "Sqrt") == 0 || strcmp (n->name, "sqrt") == 0))
+    {
+      M42Node *u = g_ptr_array_steal_index (n->children, 0);
+
+      n->kind = M42_NODE_BINARY;
+      n->op = M42_TOK_CARET;
+      g_clear_pointer (&n->name, g_free);
+      g_ptr_array_add (n->children, u);
+      g_ptr_array_add (n->children, m42_node_binary (M42_TOK_SLASH, m42_node_number (1),
+                                                     m42_node_number (2)));
+    }
+  else if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_SLASH &&
+           n->children->len == 2 &&
+           m42_node_child (n, 1)->kind != M42_NODE_NUMBER)
+    {
+      M42Node *bottom = g_ptr_array_steal_index (n->children, 1);
+
+      n->op = M42_TOK_STAR;
+      g_ptr_array_add (n->children,
+                       m42_node_binary (M42_TOK_CARET, bottom, m42_node_number (-1)));
+    }
+}
+
+/* How many nodes a tree has, up to a limit past which counting on is
+ * pointless. */
+static guint
+node_count (const M42Node *n, guint limit)
+{
+  guint total = 1;
+
+  if (n == NULL || n->children == NULL)
+    return n == NULL ? 0 : 1;
+  for (guint i = 0; i < n->children->len && total < limit; i++)
+    total += node_count (g_ptr_array_index (n->children, i), limit - total);
+  return total;
+}
+
+/* --- power series ---------------------------------------------------------
+ *
+ * Series used to be found by differentiating symbolically n times and
+ * evaluating each derivative at a, which is how it is done on paper
+ * and works for a polynomial or a sine, but the derivatives of a
+ * quotient or a root double in size with every order: Tan[x] to order
+ * 11 and 1/(1 + x^2) to order 10 never came back.  So a series is now
+ * worked out the way a computer algebra system does it, as an array of
+ * coefficients in h = x - a, added, multiplied, divided, raised and
+ * composed to the order asked for and no further, every coefficient an
+ * M42Value so that what is exact stays exact.  A function the arithmetic
+ * does not know is left to the derivatives, with a guard on their size.
+ *
+ * Every series is made to a working order a little past the one asked
+ * for, and carries the order up to which its coefficients are right:
+ * dividing Sin[x] by x costs one, and the slack pays for it. */
+
+typedef struct {
+  GPtrArray *c;      /* of M42Value*: the coefficient of h^k at index k */
+  guint      n;      /* the working order; c has n + 1 entries */
+  guint      valid;  /* the coefficients up to this index are right */
+} PowerSeries;
+
+#define PS_AT(p, k) ((M42Value *) g_ptr_array_index ((p)->c, (k)))
+
+static void
+ps_free (PowerSeries *p)
+{
+  if (p == NULL)
+    return;
+  g_ptr_array_unref (p->c);
+  g_free (p);
+}
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (PowerSeries, ps_free)
+
+static PowerSeries *
+ps_zero (guint n)
+{
+  PowerSeries *p = g_new0 (PowerSeries, 1);
+
+  p->c = g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
+  for (guint k = 0; k <= n; k++)
+    g_ptr_array_add (p->c, m42_value_exact_int (0));
+  p->n = n;
+  p->valid = n;
+  return p;
+}
+
+static void
+ps_put (PowerSeries *p, guint k, M42Value *v)   /* takes the value */
+{
+  m42_value_unref (PS_AT (p, k));
+  g_ptr_array_index (p->c, k) = v;
+}
+
+static gboolean
+ps_value_is_zero (const M42Value *v)
+{
+  return is_num (v) && v->u.number == 0;
+}
+
+/* The arithmetic that keeps an exact number exact, or NULL when the
+ * answer is not a number at all. */
+static M42Value *
+ps_op (int op, const M42Value *a, const M42Value *b)
+{
+  M42Value *r = map2 (op, (M42Value *) a, (M42Value *) b);
+
+  if (r == NULL)
+    return NULL;
+  if (is_num (r) || r->kind == M42_VALUE_BIGINT || r->kind == M42_VALUE_COMPLEX)
+    return r;
+  m42_value_unref (r);
+  return NULL;
+}
+
+static PowerSeries *
+ps_constant (const M42Value *v, guint n)
+{
+  PowerSeries *p = ps_zero (n);
+
+  ps_put (p, 0, m42_value_ref ((M42Value *) v));
+  return p;
+}
+
+/* Every coefficient multiplied by a number. */
+static PowerSeries *
+ps_scale (const PowerSeries *a, const M42Value *by)
+{
+  PowerSeries *p = ps_zero (a->n);
+
+  p->valid = a->valid;
+  for (guint k = 0; k <= a->n; k++)
+    {
+      M42Value *v = ps_op (M42_TOK_STAR, PS_AT (a, k), by);
+
+      if (v == NULL)
+        {
+          ps_free (p);
+          return NULL;
+        }
+      ps_put (p, k, v);
+    }
+  return p;
+}
+
+static PowerSeries *
+ps_add (const PowerSeries *a, const PowerSeries *b, int op)
+{
+  PowerSeries *p = ps_zero (MIN (a->n, b->n));
+
+  p->valid = MIN (a->valid, b->valid);
+  for (guint k = 0; k <= p->n; k++)
+    {
+      M42Value *v = ps_op (op, PS_AT (a, k), PS_AT (b, k));
+
+      if (v == NULL)
+        {
+          ps_free (p);
+          return NULL;
+        }
+      ps_put (p, k, v);
+    }
+  return p;
+}
+
+/* The Cauchy product, to the working order. */
+static PowerSeries *
+ps_mul (const PowerSeries *a, const PowerSeries *b)
+{
+  PowerSeries *p = ps_zero (MIN (a->n, b->n));
+
+  p->valid = MIN (a->valid, b->valid);
+  for (guint k = 0; k <= p->n; k++)
+    {
+      M42Value *sum = m42_value_exact_int (0);
+
+      for (guint j = 0; j <= k; j++)
+        {
+          M42Value *term, *next;
+
+          if (ps_value_is_zero (PS_AT (a, j)) || ps_value_is_zero (PS_AT (b, k - j)))
+            continue;
+          term = ps_op (M42_TOK_STAR, PS_AT (a, j), PS_AT (b, k - j));
+          next = term != NULL ? ps_op (M42_TOK_PLUS, sum, term) : NULL;
+          m42_value_unref (term);
+          m42_value_unref (sum);
+          sum = next;
+          if (sum == NULL)
+            {
+              ps_free (p);
+              return NULL;
+            }
+        }
+      ps_put (p, k, sum);
+    }
+  return p;
+}
+
+/* a / b.  A bottom that starts with zeros is divided out of the top
+ * first -- Sin[x]/x -- and a top that does not have them is a pole,
+ * for which there is no series: NULL. */
+static PowerSeries *
+ps_div (const PowerSeries *a, const PowerSeries *b)
+{
+  guint shift = 0, n = MIN (a->n, b->n);
+  guint valid = MIN (a->valid, b->valid);
+  PowerSeries *q;
+
+  while (shift <= valid && ps_value_is_zero (PS_AT (b, shift)))
+    shift++;
+  if (shift > valid)
+    return NULL;
+  for (guint k = 0; k < shift; k++)
+    if (!ps_value_is_zero (PS_AT (a, k)))
+      return NULL;
+  n -= shift;
+  valid -= shift;
+
+  q = ps_zero (n);
+  q->valid = valid;
+  for (guint k = 0; k <= n; k++)
+    {
+      M42Value *acc = m42_value_ref (PS_AT (a, k + shift));
+
+      for (guint j = 1; j <= k; j++)
+        {
+          M42Value *term, *next;
+
+          if (ps_value_is_zero (PS_AT (b, j + shift)) || ps_value_is_zero (PS_AT (q, k - j)))
+            continue;
+          term = ps_op (M42_TOK_STAR, PS_AT (b, j + shift), PS_AT (q, k - j));
+          next = term != NULL ? ps_op (M42_TOK_MINUS, acc, term) : NULL;
+          m42_value_unref (term);
+          m42_value_unref (acc);
+          acc = next;
+          if (acc == NULL)
+            {
+              ps_free (q);
+              return NULL;
+            }
+        }
+      {
+        M42Value *v = ps_op (M42_TOK_SLASH, acc, PS_AT (b, shift));
+
+        m42_value_unref (acc);
+        if (v == NULL)
+          {
+            ps_free (q);
+            return NULL;
+          }
+        ps_put (q, k, v);
+      }
+    }
+  return q;
+}
+
+/* d/dh, which shortens the series by one order. */
+static PowerSeries *
+ps_derivative (const PowerSeries *a)
+{
+  PowerSeries *p = ps_zero (a->n);
+
+  p->valid = a->valid > 0 ? a->valid - 1 : 0;
+  for (guint k = 0; k + 1 <= a->n; k++)
+    {
+      g_autoptr (M42Value) by = m42_value_exact_int (k + 1);
+      M42Value *v = ps_op (M42_TOK_STAR, PS_AT (a, k + 1), by);
+
+      if (v == NULL)
+        {
+          ps_free (p);
+          return NULL;
+        }
+      ps_put (p, k, v);
+    }
+  return p;
+}
+
+/* The integral in h with the given constant, which lengthens it. */
+static PowerSeries *
+ps_integrate (const PowerSeries *a, M42Value *constant)   /* takes the constant */
+{
+  PowerSeries *p = ps_zero (a->n);
+
+  p->valid = MIN (a->valid + 1, a->n);
+  ps_put (p, 0, constant);
+  for (guint k = 1; k <= a->n; k++)
+    {
+      g_autoptr (M42Value) by = m42_value_exact_int (k);
+      M42Value *v = ps_op (M42_TOK_SLASH, PS_AT (a, k - 1), by);
+
+      if (v == NULL)
+        {
+          ps_free (p);
+          return NULL;
+        }
+      ps_put (p, k, v);
+    }
+  return p;
+}
+
+/* a^p for a whole p, by squaring; a negative one divides. */
+static PowerSeries *
+ps_power_whole (const PowerSeries *a, gint64 p)
+{
+  g_autoptr (M42Value) one = m42_value_exact_int (1);
+  PowerSeries *result = ps_constant (one, a->n);
+  g_autoptr (PowerSeries) base = NULL;
+  gint64 e = p < 0 ? -p : p;
+
+  result->valid = a->valid;
+  base = ps_constant (one, a->n);
+  base->valid = a->valid;
+  for (guint k = 0; k <= a->n; k++)
+    ps_put (base, k, m42_value_ref (PS_AT (a, k)));
+  while (e > 0)
+    {
+      if (e & 1)
+        {
+          PowerSeries *next = ps_mul (result, base);
+
+          ps_free (result);
+          result = next;
+          if (result == NULL)
+            return NULL;
+        }
+      e >>= 1;
+      if (e > 0)
+        {
+          PowerSeries *next = ps_mul (base, base);
+
+          ps_free (base);
+          base = next;
+          if (base == NULL)
+            {
+              ps_free (result);
+              return NULL;
+            }
+        }
+    }
+  if (p < 0)
+    {
+      g_autoptr (PowerSeries) unit = ps_constant (one, a->n);
+      PowerSeries *inverse = ps_div (unit, result);
+
+      ps_free (result);
+      return inverse;
+    }
+  return result;
+}
+
+/* a^p for any number p, by the recurrence that comes from
+ * differentiating f = a^p: a f' = p a' f.  It needs the first
+ * coefficient of a to be a number other than zero, and a_0^p to be a
+ * number too, which Sqrt[2] is not. */
+static PowerSeries *
+ps_power (const PowerSeries *a, const M42Value *p)
+{
+  PowerSeries *f;
+  M42Value *first;
+
+  if (ps_value_is_zero (PS_AT (a, 0)))
+    return NULL;
+  first = ps_op (M42_TOK_CARET, PS_AT (a, 0), p);
+  if (first == NULL)
+    return NULL;
+  f = ps_zero (a->n);
+  f->valid = a->valid;
+  ps_put (f, 0, first);
+  for (guint k = 1; k <= a->n; k++)
+    {
+      M42Value *sum = m42_value_exact_int (0);
+
+      /* f_k = (1/(k a_0)) sum_{j=1}^{k} (p j - (k - j)) a_j f_{k-j} */
+      for (guint j = 1; j <= k; j++)
+        {
+          g_autoptr (M42Value) jj = m42_value_exact_int (j);
+          g_autoptr (M42Value) rest = m42_value_exact_int ((gint64) k - j);
+          g_autoptr (M42Value) pj = NULL;
+          g_autoptr (M42Value) weight = NULL;
+          g_autoptr (M42Value) product = NULL;
+          M42Value *term, *next;
+
+          if (ps_value_is_zero (PS_AT (a, j)) || ps_value_is_zero (PS_AT (f, k - j)))
+            continue;
+          pj = ps_op (M42_TOK_STAR, p, jj);
+          weight = pj != NULL ? ps_op (M42_TOK_MINUS, pj, rest) : NULL;
+          product = weight != NULL ? ps_op (M42_TOK_STAR, PS_AT (a, j), PS_AT (f, k - j)) : NULL;
+          term = product != NULL ? ps_op (M42_TOK_STAR, weight, product) : NULL;
+          next = term != NULL ? ps_op (M42_TOK_PLUS, sum, term) : NULL;
+          m42_value_unref (term);
+          m42_value_unref (sum);
+          sum = next;
+          if (sum == NULL)
+            {
+              ps_free (f);
+              return NULL;
+            }
+        }
+      {
+        g_autoptr (M42Value) kk = m42_value_exact_int (k);
+        g_autoptr (M42Value) divisor = ps_op (M42_TOK_STAR, kk, PS_AT (a, 0));
+        M42Value *v = divisor != NULL ? ps_op (M42_TOK_SLASH, sum, divisor) : NULL;
+
+        m42_value_unref (sum);
+        if (v == NULL)
+          {
+            ps_free (f);
+            return NULL;
+          }
+        ps_put (f, k, v);
+      }
+    }
+  return f;
+}
+
+/* sum d_k w^k for a w whose first coefficient is zero, by Horner: the
+ * series of a function about a point, with what it is a function of
+ * put in. */
+static PowerSeries *
+ps_compose (const PowerSeries *d, const PowerSeries *w)
+{
+  PowerSeries *r = ps_constant (PS_AT (d, d->n), w->n);
+
+  r->valid = MIN (d->valid, w->valid);
+  for (guint k = d->n; k > 0; k--)
+    {
+      PowerSeries *product = ps_mul (r, w);
+      g_autoptr (PowerSeries) constant = NULL;
+      PowerSeries *next;
+
+      ps_free (r);
+      if (product == NULL)
+        return NULL;
+      constant = ps_constant (PS_AT (d, k - 1), w->n);
+      next = ps_add (product, constant, M42_TOK_PLUS);
+      ps_free (product);
+      r = next;
+      if (r == NULL)
+        return NULL;
+    }
+  return r;
+}
+
+/* The series at zero of Exp, and of the sine and cosine and their
+ * hyperbolic twins: 1/k! with the signs the function has. */
+static PowerSeries *
+ps_exp_at_zero (guint n, int which)   /* 0 Exp, 1 Sin, 2 Cos, 3 Sinh, 4 Cosh */
+{
+  PowerSeries *p = ps_zero (n);
+  M42Value *term = m42_value_exact_int (1);
+
+  for (guint k = 0; k <= n; k++)
+    {
+      gboolean odd = k % 2 == 1;
+      gboolean keep = which == 0 || (which == 1 || which == 3) == odd;
+
+      if (keep)
+        {
+          M42Value *c = m42_value_ref (term);
+
+          if ((which == 1 && k % 4 == 3) || (which == 2 && k % 4 == 2))
+            {
+              g_autoptr (M42Value) minus = m42_value_exact_int (-1);
+              M42Value *negated = ps_op (M42_TOK_STAR, c, minus);
+
+              m42_value_unref (c);
+              c = negated;
+            }
+          if (c == NULL)
+            {
+              m42_value_unref (term);
+              ps_free (p);
+              return NULL;
+            }
+          ps_put (p, k, c);
+        }
+      {
+        g_autoptr (M42Value) by = m42_value_exact_int (k + 1);
+        M42Value *next = ps_op (M42_TOK_SLASH, term, by);
+
+        m42_value_unref (term);
+        term = next;
+        if (term == NULL)
+          {
+            ps_free (p);
+            return NULL;
+          }
+      }
+    }
+  m42_value_unref (term);
+  return p;
+}
+
+/* A function of a number, worked out by the evaluator: Exp[0] is 1,
+ * Log[1] is 0, Sin[Pi/6] is 1/2.  NULL when the answer is not a
+ * number. */
+static M42Value *
+ps_function_of (M42Session *s, const char *name, const M42Value *x)
+{
+  M42Node *arg = value_to_node (x);
+  g_autoptr (M42Node) call = NULL;
+  M42Value *v;
+
+  if (arg == NULL)
+    return NULL;
+  call = m42_node_call1 (name, arg);
+  v = eval (s, call);
+  if (is_num (v) || v->kind == M42_VALUE_BIGINT || v->kind == M42_VALUE_COMPLEX)
+    return v;
+  m42_value_unref (v);
+  return NULL;
+}
+
+static PowerSeries *ps_of (M42Session *s, const M42Node *n, const char *var,
+                           const M42Value *a, guint order, int depth);
+
+/* The series with its first coefficient taken away, which is what the
+ * series of a function about that coefficient is composed with. */
+static PowerSeries *
+ps_without_constant (const PowerSeries *u)
+{
+  PowerSeries *w = ps_zero (u->n);
+
+  w->valid = u->valid;
+  for (guint k = 1; k <= u->n; k++)
+    ps_put (w, k, m42_value_ref (PS_AT (u, k)));
+  return w;
+}
+
+/* Exp[u]: Exp[u_0] times the series at zero of what is left. */
+static PowerSeries *
+ps_exp (M42Session *s, const PowerSeries *u)
+{
+  g_autoptr (M42Value) at = ps_function_of (s, "Exp", PS_AT (u, 0));
+  g_autoptr (PowerSeries) table = NULL;
+  g_autoptr (PowerSeries) w = NULL;
+  g_autoptr (PowerSeries) composed = NULL;
+
+  if (at == NULL)
+    return NULL;
+  table = ps_exp_at_zero (u->n, 0);
+  w = ps_without_constant (u);
+  composed = table != NULL ? ps_compose (table, w) : NULL;
+  return composed != NULL ? ps_scale (composed, at) : NULL;
+}
+
+/* Sin[u] and Cos[u], and Sinh and Cosh: the addition formula splits
+ * off u_0, and the two series at zero take the rest. */
+static PowerSeries *
+ps_wave (M42Session *s, const PowerSeries *u, gboolean cosine, gboolean hyperbolic)
+{
+  const char *sname = hyperbolic ? "Sinh" : "Sin", *cname = hyperbolic ? "Cosh" : "Cos";
+  g_autoptr (PowerSeries) sin_table = ps_exp_at_zero (u->n, hyperbolic ? 3 : 1);
+  g_autoptr (PowerSeries) cos_table = ps_exp_at_zero (u->n, hyperbolic ? 4 : 2);
+  g_autoptr (PowerSeries) w = ps_without_constant (u);
+  g_autoptr (PowerSeries) sin_w = NULL, cos_w = NULL;
+  g_autoptr (PowerSeries) first = NULL, second = NULL;
+  g_autoptr (M42Value) sin_at = NULL, cos_at = NULL;
+
+  if (sin_table == NULL || cos_table == NULL)
+    return NULL;
+  sin_w = ps_compose (sin_table, w);
+  cos_w = ps_compose (cos_table, w);
+  if (sin_w == NULL || cos_w == NULL)
+    return NULL;
+  if (ps_value_is_zero (PS_AT (u, 0)))
+    return ps_scale (cosine ? cos_w : sin_w, PS_AT (sin_table, 1));   /* times one */
+
+  sin_at = ps_function_of (s, sname, PS_AT (u, 0));
+  cos_at = ps_function_of (s, cname, PS_AT (u, 0));
+  if (sin_at == NULL || cos_at == NULL)
+    return NULL;
+  if (cosine)
+    {
+      /* Cos[u_0 + w] = Cos[u_0] Cos[w] - Sin[u_0] Sin[w]; Cosh adds. */
+      first = ps_scale (cos_w, cos_at);
+      second = ps_scale (sin_w, sin_at);
+      return first != NULL && second != NULL
+        ? ps_add (first, second, hyperbolic ? M42_TOK_PLUS : M42_TOK_MINUS) : NULL;
+    }
+  /* Sin[u_0 + w] = Sin[u_0] Cos[w] + Cos[u_0] Sin[w], and Sinh the same. */
+  first = ps_scale (cos_w, sin_at);
+  second = ps_scale (sin_w, cos_at);
+  return first != NULL && second != NULL ? ps_add (first, second, M42_TOK_PLUS) : NULL;
+}
+
+/* Log[u]: Log[u_0] and the integral of u'/u. */
+static PowerSeries *
+ps_log (M42Session *s, const PowerSeries *u)
+{
+  M42Value *at;
+  g_autoptr (PowerSeries) slope = NULL, quotient = NULL;
+
+  if (ps_value_is_zero (PS_AT (u, 0)))
+    return NULL;
+  at = ps_function_of (s, "Log", PS_AT (u, 0));
+  if (at == NULL)
+    return NULL;
+  slope = ps_derivative (u);
+  quotient = slope != NULL ? ps_div (slope, u) : NULL;
+  if (quotient == NULL)
+    {
+      m42_value_unref (at);
+      return NULL;
+    }
+  return ps_integrate (quotient, at);
+}
+
+/* f[u] for the functions the arithmetic knows, and for any other with
+ * a derivative: f[u_0] plus the integral of the series of D[f[u], x],
+ * which is what ArcTan, ArcSin and Erf come out of. */
+static PowerSeries *
+ps_function (M42Session *s, const char *f, const M42Node *call, const PowerSeries *u,
+             const char *var, const M42Value *a, guint order, int depth)
+{
+  struct { const char *upper, *lower; int sine, cosine; } table[] = {
+    { "Tan", "tan", 0, 1 }, { "Cot", "cot", 1, 0 }, { "Sec", "sec", -1, 1 },
+    { "Csc", "csc", -1, 0 }, { "Tanh", "tanh", 2, 3 }, { "Coth", "coth", 3, 2 },
+    { "Sech", "sech", -1, 3 }, { "Csch", "csch", -1, 2 },
+  };
+
+  if (!strcmp (f, "Exp") || !strcmp (f, "exp"))
+    return ps_exp (s, u);
+  if (!strcmp (f, "Sin") || !strcmp (f, "sin"))
+    return ps_wave (s, u, FALSE, FALSE);
+  if (!strcmp (f, "Cos") || !strcmp (f, "cos"))
+    return ps_wave (s, u, TRUE, FALSE);
+  if (!strcmp (f, "Sinh") || !strcmp (f, "sinh"))
+    return ps_wave (s, u, FALSE, TRUE);
+  if (!strcmp (f, "Cosh") || !strcmp (f, "cosh"))
+    return ps_wave (s, u, TRUE, TRUE);
+  if (!strcmp (f, "Log") || !strcmp (f, "log"))
+    return ps_log (s, u);
+  if (!strcmp (f, "Sqrt") || !strcmp (f, "sqrt"))
+    {
+      g_autoptr (M42Value) half = m42_value_rational (1, 2);
+
+      return ps_power (u, half);
+    }
+
+  /* The quotients of the waves: Tan is Sin over Cos, Sec is one over
+   * Cos, and so on.  sine and cosine say which wave goes on top and
+   * on the bottom: 0 Sin, 1 Cos, 2 Sinh, 3 Cosh, -1 for a plain one. */
+  for (guint i = 0; i < G_N_ELEMENTS (table); i++)
+    if (!strcmp (f, table[i].upper) || !strcmp (f, table[i].lower))
+      {
+        g_autoptr (PowerSeries) top = NULL, bottom = NULL;
+        g_autoptr (M42Value) one = m42_value_exact_int (1);
+
+        if (table[i].sine < 0)
+          top = ps_constant (one, u->n);
+        else
+          top = ps_wave (s, u, table[i].sine % 2 == 1, table[i].sine >= 2);
+        bottom = ps_wave (s, u, table[i].cosine % 2 == 1, table[i].cosine >= 2);
+        return top != NULL && bottom != NULL ? ps_div (top, bottom) : NULL;
+      }
+
+  {
+    /* Anything else with a derivative. */
+    g_autoptr (M42Node) d = m42_node_differentiate (call, var);
+    g_autoptr (M42Node) tidy = NULL;
+    g_autoptr (PowerSeries) slope = NULL;
+    M42Value *at;
+
+    if (d == NULL)
+      return NULL;
+    tidy = m42_node_simplify (d);
+    slope = ps_of (s, tidy, var, a, order, depth + 1);
+    if (slope == NULL)
+      return NULL;
+    at = ps_function_of (s, f, PS_AT (u, 0));
+    if (at == NULL)
+      return NULL;
+    return ps_integrate (slope, at);
+  }
+}
+
+/* The series of an expression about a, to the working order. */
+static PowerSeries *
+ps_of (M42Session *s, const M42Node *n, const char *var, const M42Value *a,
+       guint order, int depth)
+{
+  if (depth > 24)
+    return NULL;
+
+  switch (n->kind)
+    {
+    case M42_NODE_NUMBER:
+      {
+        g_autoptr (M42Value) v = m42_value_number (n->number);
+
+        return ps_constant (v, order);
+      }
+
+    case M42_NODE_IDENT:
+      if (strcmp (n->name, var) == 0)
+        {
+          PowerSeries *p = ps_constant (a, order);
+
+          if (order >= 1)
+            ps_put (p, 1, m42_value_exact_int (1));
+          return p;
+        }
+      {
+        g_autoptr (M42Value) v = eval (s, n);
+
+        if (!(is_num (v) || v->kind == M42_VALUE_BIGINT || v->kind == M42_VALUE_COMPLEX))
+          return NULL;
+        return ps_constant (v, order);
+      }
+
+    case M42_NODE_UNARY:
+      if (n->op == M42_TOK_MINUS)
+        {
+          g_autoptr (PowerSeries) inner = ps_of (s, m42_node_child (n, 0), var, a, order, depth + 1);
+          g_autoptr (M42Value) minus = m42_value_exact_int (-1);
+
+          return inner != NULL ? ps_scale (inner, minus) : NULL;
+        }
+      return NULL;
+
+    case M42_NODE_BINARY:
+      {
+        const M42Node *left = m42_node_child (n, 0), *right = m42_node_child (n, 1);
+        g_autoptr (PowerSeries) x = NULL, y = NULL;
+
+        if (n->op == M42_TOK_CARET && !m42_node_depends_on (right, var))
+          {
+            g_autoptr (M42Value) p = eval (s, right);
+
+            x = ps_of (s, left, var, a, order, depth + 1);
+            if (x == NULL)
+              return NULL;
+            if (is_whole (p) && p->kind == M42_VALUE_NUMBER && ABS (p->num) <= 64)
+              return ps_power_whole (x, p->num);
+            if (is_num (p))
+              return ps_power (x, p);
+            return NULL;
+          }
+        if (n->op == M42_TOK_CARET)
+          {
+            /* a^b with b a function of x: Exp[b Log[a]]. */
+            g_autoptr (PowerSeries) logarithm = NULL, exponent = NULL;
+
+            x = ps_of (s, left, var, a, order, depth + 1);
+            y = ps_of (s, right, var, a, order, depth + 1);
+            logarithm = x != NULL && y != NULL ? ps_log (s, x) : NULL;
+            exponent = logarithm != NULL ? ps_mul (y, logarithm) : NULL;
+            return exponent != NULL ? ps_exp (s, exponent) : NULL;
+          }
+        if (n->op != M42_TOK_PLUS && n->op != M42_TOK_MINUS &&
+            n->op != M42_TOK_STAR && n->op != M42_TOK_SLASH)
+          return NULL;
+        x = ps_of (s, left, var, a, order, depth + 1);
+        y = x != NULL ? ps_of (s, right, var, a, order, depth + 1) : NULL;
+        if (y == NULL)
+          return NULL;
+        switch (n->op)
+          {
+          case M42_TOK_PLUS:
+          case M42_TOK_MINUS: return ps_add (x, y, n->op);
+          case M42_TOK_STAR:  return ps_mul (x, y);
+          default:            return ps_div (x, y);
+          }
+      }
+
+    case M42_NODE_CALL:
+      if (n->children->len == 1)
+        {
+          g_autoptr (PowerSeries) u = ps_of (s, m42_node_child (n, 0), var, a, order, depth + 1);
+
+          return u != NULL ? ps_function (s, n->name, n, u, var, a, order, depth) : NULL;
+        }
+      return NULL;
+
+    default:
+      return NULL;
+    }
+}
+
+/* The coefficients by the old way, differentiating symbolically and
+ * evaluating at a, for whatever the arithmetic could not do.  Each is
+ * the derivative over k!, exact when the derivative was. */
+static GPtrArray *
+series_by_derivatives (M42Session *s, const M42Node *expr, const char *var, double a,
+                       guint order, M42Value **error)
+{
+  GPtrArray *out = g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
+  g_autoptr (M42Node) f = m42_node_copy (expr);
+  double factorial_k = 1;
+
+  /* Sqrt[u] is differentiated as a quotient, and the quotient of a
+   * quotient doubles in size with every order.  Written as u^(1/2)
+   * the power rule keeps each derivative one term long, and nobody
+   * sees the derivatives anyway. */
+  roots_as_powers (f);
+
+  for (guint k = 0; k <= order; k++)
+    {
+      g_autoptr (M42Value) at = NULL;
+      double c;
+
+      if (k > 0)
+        {
+          M42Node *d = m42_node_differentiate (f, var);
+
+          if (d == NULL)
+            {
+              *error = m42_value_error ("Series: cannot differentiate that expression %u times", k);
+              g_ptr_array_unref (out);
+              return NULL;
+            }
+          m42_node_free (f);
+          f = m42_node_simplify (d);
+          m42_node_free (d);
+          factorial_k *= k;
+          /* A derivative that keeps doubling in size would go on for
+           * hours; better to say so than to freeze the window. */
+          if (node_count (f, 50000) >= 50000)
+            {
+              *error = m42_value_error ("Series: the derivatives of that expression grow too large past order %u", k - 1);
+              g_ptr_array_unref (out);
+              return NULL;
+            }
+        }
+
+      at = eval_at (s, f, var, a);
+      if (!value_number (at, &c) || !isfinite (c))
+        {
+          *error = m42_value_error ("Series: the expression is not smooth at %g", a);
+          g_ptr_array_unref (out);
+          return NULL;
+        }
+      if (at->kind == M42_VALUE_NUMBER && at->exact &&
+          (__int128) at->den * (__int128) factorial_k <= G_MAXINT64)
+        g_ptr_array_add (out, m42_value_rational (at->num, at->den * (gint64) factorial_k));
+      else
+        g_ptr_array_add (out, m42_value_real (c / factorial_k));
+    }
+  return out;
+}
+
+/* Series[f, {x, a, n}]: the Taylor polynomial to order n about a. */
 static M42Value *
 series (M42Session *s, const M42Node *call)
 {
@@ -3082,9 +3952,10 @@ series (M42Session *s, const M42Node *call)
   const char *var;
   double a, order;
   M42Value *err;
+  g_autoptr (M42Value) va = NULL;
   g_autoptr (M42Node) f = NULL;
+  g_autoptr (GPtrArray) coefficients = NULL;
   M42Node *out = NULL;
-  double factorial_k = 1;
 
   if (call->children->len != 2)
     return m42_value_error ("Series expects an expression and {x, a, n}");
@@ -3094,8 +3965,9 @@ series (M42Session *s, const M42Node *call)
     return m42_value_error ("Series expects {x, a, n}");
   var = m42_node_child (spec, 0)->name;
   {
-    g_autoptr (M42Value) va = eval (s, m42_node_child (spec, 1));
     g_autoptr (M42Value) vn = eval (s, m42_node_child (spec, 2));
+
+    va = eval (s, m42_node_child (spec, 1));
     if (!need_number (va, "Series", &a, &err) || !need_number (vn, "Series", &order, &err))
       return err;
   }
@@ -3104,52 +3976,101 @@ series (M42Session *s, const M42Node *call)
 
   f = symbolic_argument (s, m42_node_child (call, 0), var);
 
-  for (int k = 0; k <= (int) order; k++)
+  {
+    /* The arithmetic first, with room to spare for a division that
+     * costs an order, and the derivatives for what it cannot do. */
+    g_autoptr (PowerSeries) ps = NULL;
+
+    if (is_num (va))
+      ps = ps_of (s, f, var, va, (guint) order + 8, 0);
+    if (ps != NULL && ps->valid >= (guint) order)
+      {
+        coefficients = g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
+        for (guint k = 0; k <= (guint) order; k++)
+          g_ptr_array_add (coefficients, m42_value_ref (PS_AT (ps, k)));
+      }
+  }
+  if (coefficients == NULL)
     {
+      coefficients = series_by_derivatives (s, f, var, a, (guint) order, &err);
+      if (coefficients == NULL)
+        return err;
+    }
+
+  for (guint k = 0; k <= (guint) order; k++)
+    {
+      const M42Value *coefficient = g_ptr_array_index (coefficients, k);
+      gboolean exact = coefficient->kind == M42_VALUE_NUMBER && coefficient->exact;
+      gboolean negative, is_one;
       double c;
-      M42Node *term;
+      M42Node *number, *term;
 
-      if (k > 0)
-        {
-          M42Node *d = m42_node_differentiate (f, var);
-          if (d == NULL)
-            return m42_value_error ("Series: cannot differentiate that expression %d times", k);
-          m42_node_free (f);
-          f = m42_node_simplify (d);
-          m42_node_free (d);
-          factorial_k *= k;
-        }
-
-      c = number_at (s, f, var, a);
+      if (!value_number (coefficient, &c))
+        return m42_value_error ("Series: the coefficient of order %u is not a real number", k);
       if (!isfinite (c))
         return m42_value_error ("Series: the expression is not smooth at %g", a);
-      c /= factorial_k;
-      if (fabs (c) < 1e-12)
+      if (exact ? coefficient->num == 0 : fabs (c) < 1e-12)
         continue;
-      if (fabs (c - round (c)) < 1e-9 * MAX (1.0, fabs (c)))
+      if (!exact && fabs (c - round (c)) < 1e-9 * MAX (1.0, fabs (c)))
         c = round (c);
 
-      if (k == 0)
-        term = coefficient_node (fabs (c));
+      /* A coefficient is written the way it would be by hand: x^3/6,
+       * not 0.166666666666667 x^3, and -x/2 rather than -(1/2) x.  A
+       * fraction goes under the power, (x - 1)^2/8, so that it is not
+       * multiplied out into x/2 - 1/2. */
+      negative = c < 0;
+      if (exact)
+        {
+          is_one = ABS (coefficient->num) == 1;
+          number = m42_node_number ((double) ABS (coefficient->num));
+        }
       else
         {
+          is_one = fabs (c) == 1;
+          number = coefficient_node (fabs (c));
+        }
+
+      if (k == 0)
+        {
+          term = exact && coefficient->den != 1
+            ? m42_node_binary (M42_TOK_SLASH, number, m42_node_number ((double) coefficient->den))
+            : number;
+        }
+      else
+        {
+          /* About a point other than zero the powers are of x - a,
+           * with a written as it was given: Pi/2, not 1.5707963. */
           M42Node *base = a == 0 ? m42_node_ident (var)
                                  : m42_node_binary (M42_TOK_MINUS, m42_node_ident (var),
-                                                    m42_node_number (a));
+                                                    va->exact ? m42_node_number (a)
+                                                              : m42_node_copy (m42_node_child (spec, 1)));
           if (k > 1)
             base = m42_node_binary (M42_TOK_CARET, base, m42_node_number (k));
-          term = fabs (c) == 1 ? base
-                               : m42_node_binary (M42_TOK_STAR, coefficient_node (fabs (c)), base);
+          if (is_one)
+            {
+              m42_node_free (number);
+              term = base;
+            }
+          else
+            term = m42_node_binary (M42_TOK_STAR, number, base);
+          if (exact && coefficient->den != 1)
+            term = m42_node_binary (M42_TOK_SLASH, term, m42_node_number ((double) coefficient->den));
         }
       /* A negative coefficient is a term taken away, not one added:
        * x - x^3/6 rather than x + -(1/6) x^3. */
       if (out == NULL)
-        out = c < 0 ? m42_node_unary (M42_TOK_MINUS, term) : term;
+        out = negative ? m42_node_unary (M42_TOK_MINUS, term) : term;
       else
-        out = m42_node_binary (c < 0 ? M42_TOK_MINUS : M42_TOK_PLUS, out, term);
+        out = m42_node_binary (negative ? M42_TOK_MINUS : M42_TOK_PLUS, out, term);
     }
 
-  return expr_result (out != NULL ? out : m42_node_number (0));
+  /* The tree is tidy as built, and simplifying it would only multiply
+   * (x - 1)/2 out into x/2 - 1/2. */
+  if (out == NULL)
+    return m42_value_exact_int (0);
+  if (out->kind == M42_NODE_NUMBER)
+    return expr_result (out);
+  return m42_value_expr (out);
 }
 
 /* f(x, y) for a differential equation: the right-hand side evaluated
@@ -6967,6 +7888,23 @@ value_matches (M42Session *s, const M42Value *v, const M42Value *pattern)
              m42_node_match (shape, subject, names, pattern_test, s);
     }
 
+  /* A list with patterns in it -- {_, _}, {___Integer}, {x_, y__} --
+   * evaluates to a list of expressions rather than to one expression,
+   * and used to be compared as text, which matched nothing. */
+  if (pattern->kind == M42_VALUE_LIST)
+    {
+      g_autoptr (M42Node) list = value_to_node (pattern);
+
+      if (list != NULL && m42_node_has_pattern (list))
+        {
+          g_autoptr (M42Node) subject = value_to_node (v);
+          g_autoptr (GHashTable) names = m42_pattern_names_new ();
+
+          return subject != NULL &&
+                 m42_node_match (list, subject, names, pattern_test, s);
+        }
+    }
+
   {
     g_autofree char *a = m42_value_to_string (v);
     g_autofree char *b = m42_value_to_string (pattern);
@@ -10439,6 +11377,480 @@ list_plot_with_options (GPtrArray *args, M42SeriesKind kind, gboolean matlab)
   return out;
 }
 
+/* --- graphs in the other sense ---------------------------------------------
+ *
+ * Graph[{1 -> 2, 2 -> 3}] draws vertices and the edges between them.
+ * A rule is a directed edge, UndirectedEdge[a, b] or a pair {a, b} one
+ * with no direction, and a vertex on its own is drawn alone.  A graph
+ * whose edges all point one way and never come round -- a directed
+ * acyclic graph -- is laid out in layers from its sources down, each
+ * vertex as far down as the longest path to it, and the vertices in a
+ * layer are ordered under the average of their neighbours so that the
+ * edges cross as little as such a simple rule manages.  Anything else
+ * is laid out by springs: every pair pushes apart and every edge pulls
+ * together, from a start round a circle, until it settles. */
+
+typedef struct {
+  GPtrArray *labels;    /* of char*, one per vertex, in order of first mention */
+  GPtrArray *values;    /* of M42Value*, the vertex as it was written */
+  GArray    *from, *to; /* of guint, one per edge */
+  GArray    *directed;  /* of gboolean, one per edge */
+} Network;
+
+static Network *
+network_new (void)
+{
+  Network *g = g_new0 (Network, 1);
+
+  g->labels = g_ptr_array_new_with_free_func (g_free);
+  g->values = g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
+  g->from = g_array_new (FALSE, FALSE, sizeof (guint));
+  g->to = g_array_new (FALSE, FALSE, sizeof (guint));
+  g->directed = g_array_new (FALSE, FALSE, sizeof (gboolean));
+  return g;
+}
+
+static void
+network_free (Network *g)
+{
+  g_ptr_array_unref (g->labels);
+  g_ptr_array_unref (g->values);
+  g_array_unref (g->from);
+  g_array_unref (g->to);
+  g_array_unref (g->directed);
+  g_free (g);
+}
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (Network, network_free)
+
+/* The vertex a value names, added if it is new: its label is the text
+ * it is written as, so that 1, "a" and x are each their own. */
+static guint
+network_vertex (Network *g, const M42Value *v)
+{
+  g_autofree char *label = v->kind == M42_VALUE_STRING ? g_strdup (v->u.string)
+                                                        : m42_value_to_string (v);
+
+  for (guint i = 0; i < g->labels->len; i++)
+    if (strcmp (g_ptr_array_index (g->labels, i), label) == 0)
+      return i;
+  g_ptr_array_add (g->labels, g_steal_pointer (&label));
+  g_ptr_array_add (g->values, m42_value_ref ((M42Value *) v));
+  return g->labels->len - 1;
+}
+
+/* The same for one end of an edge written as a tree: 1 -> 2 holds its
+ * ends as nodes. */
+static guint
+network_vertex_of_node (Network *g, const M42Node *n)
+{
+  g_autoptr (M42Value) v = NULL;
+
+  if (n->kind == M42_NODE_NUMBER)
+    v = m42_value_number (n->number);
+  else if (n->kind == M42_NODE_STRING)
+    v = m42_value_string (n->name);
+  else
+    v = m42_value_expr (m42_node_copy (n));
+  return network_vertex (g, v);
+}
+
+static void
+network_edge (Network *g, guint a, guint b, gboolean directed)
+{
+  g_array_append_val (g->from, a);
+  g_array_append_val (g->to, b);
+  g_array_append_val (g->directed, directed);
+}
+
+/* The edges of Graph[list]: rules, UndirectedEdge, pairs and lone
+ * vertices.  An error value when something else is in the list. */
+static M42Value *
+network_read_edges (Network *g, const M42Value *list)
+{
+  if (list->kind != M42_VALUE_LIST)
+    return m42_value_error ("Graph expects a list of edges, as {1 -> 2, 2 -> 3}");
+  for (guint i = 0; i < m42_value_list_length (list); i++)
+    {
+      const M42Value *e = m42_value_list_nth (list, i);
+
+      if (e->kind == M42_VALUE_EXPR && e->u.expr->kind == M42_NODE_RULE &&
+          e->u.expr->children->len == 2)
+        {
+          guint a = network_vertex_of_node (g, m42_node_child (e->u.expr, 0));
+          guint b = network_vertex_of_node (g, m42_node_child (e->u.expr, 1));
+
+          network_edge (g, a, b, TRUE);
+        }
+      else if (e->kind == M42_VALUE_EXPR && e->u.expr->kind == M42_NODE_CALL &&
+               e->u.expr->children->len == 2 &&
+               (strcmp (e->u.expr->name, "UndirectedEdge") == 0 ||
+                strcmp (e->u.expr->name, "DirectedEdge") == 0))
+        {
+          guint a = network_vertex_of_node (g, m42_node_child (e->u.expr, 0));
+          guint b = network_vertex_of_node (g, m42_node_child (e->u.expr, 1));
+
+          network_edge (g, a, b, e->u.expr->name[0] == 'D');
+        }
+      else if (e->kind == M42_VALUE_LIST && m42_value_list_length (e) == 2)
+        {
+          guint a = network_vertex (g, m42_value_list_nth (e, 0));
+          guint b = network_vertex (g, m42_value_list_nth (e, 1));
+
+          network_edge (g, a, b, FALSE);
+        }
+      else if (is_num (e) || e->kind == M42_VALUE_STRING || e->kind == M42_VALUE_EXPR)
+        network_vertex (g, e);
+      else
+        return m42_value_error ("Graph expects edges written 1 -> 2, UndirectedEdge[1, 2] or {1, 2}");
+    }
+  return NULL;
+}
+
+/* Kahn's ordering: every vertex after all the edges into it.  Fills
+ * order with the vertices and layer with how far down each goes, and
+ * answers FALSE for a graph with an undirected edge or a cycle, which
+ * has no such ordering. */
+static gboolean
+network_topological (const Network *g, GArray *order, GArray *layer)
+{
+  guint n = g->labels->len;
+  g_autofree guint *indegree = g_new0 (guint, n);
+  g_autofree guint *queue = g_new0 (guint, n + 1);
+  guint head = 0, tail = 0;
+
+  g_array_set_size (layer, n);
+  for (guint e = 0; e < g->from->len; e++)
+    {
+      if (!g_array_index (g->directed, gboolean, e))
+        return FALSE;
+      indegree[g_array_index (g->to, guint, e)]++;
+    }
+  for (guint v = 0; v < n; v++)
+    if (indegree[v] == 0)
+      queue[tail++] = v;
+  while (head < tail)
+    {
+      guint v = queue[head++];
+
+      g_array_append_val (order, v);
+      for (guint e = 0; e < g->from->len; e++)
+        if (g_array_index (g->from, guint, e) == v)
+          {
+            guint w = g_array_index (g->to, guint, e);
+
+            g_array_index (layer, int, w) = MAX (g_array_index (layer, int, w),
+                                                 g_array_index (layer, int, v) + 1);
+            if (--indegree[w] == 0)
+              queue[tail++] = w;
+          }
+    }
+  return order->len == n;
+}
+
+/* Where the vertices of a directed acyclic graph go: a row per layer,
+ * sources at the top, ordered within the row by the average place of
+ * their neighbours in the rows next to it, a few times up and down. */
+static void
+network_layered (const Network *g, const GArray *layer, double *x, double *y)
+{
+  guint n = g->labels->len, layers = 0, widest = 1;
+  g_autofree double *pos = g_new0 (double, n);
+  g_autofree guint *count = NULL;
+
+  for (guint v = 0; v < n; v++)
+    layers = MAX (layers, (guint) g_array_index (layer, int, v) + 1);
+  count = g_new0 (guint, layers);
+  for (guint v = 0; v < n; v++)
+    pos[v] = count[g_array_index (layer, int, v)]++;
+  for (guint l = 0; l < layers; l++)
+    widest = MAX (widest, count[l]);
+
+  for (int sweep = 0; sweep < 6; sweep++)
+    {
+      gboolean down = sweep % 2 == 0;
+
+      for (guint step = 0; step < layers; step++)
+        {
+          guint l = down ? step : layers - 1 - step;
+          g_autofree double *wish = g_new0 (double, n);
+          g_autofree guint *row = g_new0 (guint, n);
+          guint in_row = 0;
+
+          /* Each vertex in the row wishes to sit under the average of
+           * the neighbours it has in the row before, or keeps its
+           * place when it has none. */
+          for (guint v = 0; v < n; v++)
+            {
+              double sum = 0;
+              guint neighbours = 0;
+
+              if ((guint) g_array_index (layer, int, v) != l)
+                continue;
+              for (guint e = 0; e < g->from->len; e++)
+                {
+                  guint a = g_array_index (g->from, guint, e), b = g_array_index (g->to, guint, e);
+                  guint other = a == v ? b : b == v ? a : n;
+
+                  if (other == n)
+                    continue;
+                  if (down ? (guint) g_array_index (layer, int, other) < l
+                           : (guint) g_array_index (layer, int, other) > l)
+                    {
+                      sum += pos[other] / MAX (count[g_array_index (layer, int, other)], 1u);
+                      neighbours++;
+                    }
+                }
+              wish[v] = neighbours > 0 ? sum / neighbours : pos[v] / MAX (count[l], 1u);
+              row[in_row++] = v;
+            }
+          /* Sorted by wish, ties keeping their order. */
+          for (guint i = 1; i < in_row; i++)
+            for (guint j = i; j > 0 && wish[row[j - 1]] > wish[row[j]]; j--)
+              {
+                guint t = row[j - 1];
+                row[j - 1] = row[j];
+                row[j] = t;
+              }
+          for (guint i = 0; i < in_row; i++)
+            pos[row[i]] = i;
+        }
+    }
+
+  for (guint v = 0; v < n; v++)
+    {
+      guint l = g_array_index (layer, int, v);
+
+      x[v] = 0.5 + (pos[v] - (count[l] - 1) / 2.0) / widest;
+      y[v] = layers > 1 ? (double) l / (layers - 1) : 0.5;
+    }
+}
+
+/* Where the vertices of any other graph go: pushed apart by their
+ * distance and pulled together along the edges, from a circle, cooling
+ * as it goes, then stretched to fill the picture. */
+static void
+network_springs (const Network *g, double *x, double *y)
+{
+  guint n = g->labels->len;
+  double k = 0.5 / sqrt (MAX (n, 1u)), heat = 0.1;
+  g_autofree double *dx = g_new0 (double, n);
+  g_autofree double *dy = g_new0 (double, n);
+  double lo_x = 1, hi_x = 0, lo_y = 1, hi_y = 0;
+
+  for (guint v = 0; v < n; v++)
+    {
+      x[v] = 0.5 + 0.4 * cos (2 * G_PI * v / MAX (n, 1u));
+      y[v] = 0.5 + 0.4 * sin (2 * G_PI * v / MAX (n, 1u));
+    }
+  for (int round = 0; round < 300 && n > 1; round++)
+    {
+      for (guint v = 0; v < n; v++)
+        dx[v] = dy[v] = 0;
+      for (guint v = 0; v < n; v++)
+        for (guint w = v + 1; w < n; w++)
+          {
+            double ex = x[v] - x[w], ey = y[v] - y[w];
+            double d = MAX (hypot (ex, ey), 1e-3), f = k * k / d;
+
+            dx[v] += ex / d * f;
+            dy[v] += ey / d * f;
+            dx[w] -= ex / d * f;
+            dy[w] -= ey / d * f;
+          }
+      for (guint e = 0; e < g->from->len; e++)
+        {
+          guint v = g_array_index (g->from, guint, e), w = g_array_index (g->to, guint, e);
+          double ex = x[v] - x[w], ey = y[v] - y[w];
+          double d = MAX (hypot (ex, ey), 1e-3), f = d * d / k;
+
+          if (v == w)
+            continue;
+          dx[v] -= ex / d * f;
+          dy[v] -= ey / d * f;
+          dx[w] += ex / d * f;
+          dy[w] += ey / d * f;
+        }
+      for (guint v = 0; v < n; v++)
+        {
+          double d = hypot (dx[v], dy[v]);
+
+          if (d > 1e-9)
+            {
+              x[v] += dx[v] / d * MIN (d, heat);
+              y[v] += dy[v] / d * MIN (d, heat);
+            }
+          x[v] = CLAMP (x[v], 0, 1);
+          y[v] = CLAMP (y[v], 0, 1);
+        }
+      heat *= 0.985;
+    }
+  for (guint v = 0; v < n; v++)
+    {
+      lo_x = MIN (lo_x, x[v]); hi_x = MAX (hi_x, x[v]);
+      lo_y = MIN (lo_y, y[v]); hi_y = MAX (hi_y, y[v]);
+    }
+  for (guint v = 0; v < n; v++)
+    {
+      x[v] = hi_x - lo_x > 1e-9 ? (x[v] - lo_x) / (hi_x - lo_x) : 0.5;
+      y[v] = hi_y - lo_y > 1e-9 ? (y[v] - lo_y) / (hi_y - lo_y) : 0.5;
+    }
+}
+
+/* The picture: a directed acyclic graph in layers, anything else by
+ * springs. */
+static M42Value *
+network_plot (const Network *g)
+{
+  guint n = g->labels->len;
+  g_autofree double *x = g_new0 (double, n);
+  g_autofree double *y = g_new0 (double, n);
+  g_autoptr (GArray) order = g_array_new (FALSE, TRUE, sizeof (guint));
+  g_autoptr (GArray) layer = g_array_new (FALSE, TRUE, sizeof (int));
+  M42Value *out;
+
+  if (n == 0)
+    return m42_value_error ("Graph: there is nothing to draw");
+  if (network_topological (g, order, layer))
+    network_layered (g, layer, x, y);
+  else
+    network_springs (g, x, y);
+
+  out = m42_value_plot_new ();
+  for (guint v = 0; v < n; v++)
+    m42_plot_add_vertex (out->u.plot, g_ptr_array_index (g->labels, v), x[v], y[v]);
+  for (guint e = 0; e < g->from->len; e++)
+    m42_plot_add_edge (out->u.plot, g_array_index (g->from, guint, e),
+                       g_array_index (g->to, guint, e), g_array_index (g->directed, gboolean, e));
+  out->u.plot->xmin = out->u.plot->ymin = 0;
+  out->u.plot->xmax = out->u.plot->ymax = 1;
+  return out;
+}
+
+typedef enum {
+  NETWORK_EDGES,            /* Graph[{1 -> 2, ...}] */
+  NETWORK_MATRIX,           /* AdjacencyGraph[m] */
+  NETWORK_MATLAB_DIRECTED,  /* digraph(s, t) */
+  NETWORK_MATLAB,           /* graph(s, t) */
+} NetworkShape;
+
+/* The graph the arguments describe, in whichever of the four ways. */
+static M42Value *
+network_build (GPtrArray *args, NetworkShape shape, Network **out)
+{
+  g_autoptr (Network) g = network_new ();
+  guint from;
+  g_autoptr (GPtrArray) data = data_arguments (args, &from);
+
+  if (shape == NETWORK_EDGES)
+    {
+      M42Value *bad;
+
+      if (data->len != 1)
+        return m42_value_error ("Graph expects a list of edges, as {1 -> 2, 2 -> 3}");
+      bad = network_read_edges (g, g_ptr_array_index (data, 0));
+      if (bad != NULL)
+        return bad;
+    }
+  else if (shape == NETWORK_MATRIX)
+    {
+      const M42Value *m;
+      guint rows, cols;
+      gboolean symmetric = TRUE;
+
+      if (data->len != 1 || !m42_value_is_matrix (g_ptr_array_index (data, 0), &rows, &cols) ||
+          rows != cols)
+        return m42_value_error ("AdjacencyGraph expects a square matrix");
+      m = g_ptr_array_index (data, 0);
+      for (guint i = 0; i < rows; i++)
+        {
+          g_autoptr (M42Value) name = m42_value_exact_int (i + 1);
+
+          network_vertex (g, name);
+          for (guint j = 0; j < cols; j++)
+            if (m42_value_list_nth (m42_value_list_nth (m, i), j)->u.number !=
+                m42_value_list_nth (m42_value_list_nth (m, j), i)->u.number)
+              symmetric = FALSE;
+        }
+      /* A symmetric matrix is an undirected graph, drawn with one edge
+       * between a pair rather than an arrow each way. */
+      for (guint i = 0; i < rows; i++)
+        for (guint j = symmetric ? i : 0; j < cols; j++)
+          if (m42_value_list_nth (m42_value_list_nth (m, i), j)->u.number != 0)
+            network_edge (g, i, j, !symmetric);
+    }
+  else
+    {
+      const M42Value *s, *t;
+
+      if (data->len != 2 || g_ptr_array_index (data, 0) == NULL)
+        return m42_value_error ("%s expects the lists of where the edges start and where they end",
+                                shape == NETWORK_MATLAB ? "graph" : "digraph");
+      s = g_ptr_array_index (data, 0);
+      t = g_ptr_array_index (data, 1);
+      if (s->kind != M42_VALUE_LIST || t->kind != M42_VALUE_LIST ||
+          m42_value_list_length (s) != m42_value_list_length (t))
+        return m42_value_error ("%s expects two lists of the same length",
+                                shape == NETWORK_MATLAB ? "graph" : "digraph");
+      for (guint i = 0; i < m42_value_list_length (s); i++)
+        {
+          guint a = network_vertex (g, m42_value_list_nth (s, i));
+          guint b = network_vertex (g, m42_value_list_nth (t, i));
+
+          network_edge (g, a, b, shape == NETWORK_MATLAB_DIRECTED);
+        }
+    }
+  *out = g_steal_pointer (&g);
+  return NULL;
+}
+
+static M42Value *
+network_graph (GPtrArray *args, NetworkShape shape)
+{
+  g_autoptr (Network) g = NULL;
+  M42Value *bad = network_build (args, shape, &g);
+  M42Value *out;
+  guint from;
+  g_autoptr (GPtrArray) data = NULL;
+
+  if (bad != NULL)
+    return bad;
+  out = network_plot (g);
+  data = data_arguments (args, &from);
+  if (out->kind == M42_VALUE_PLOT)
+    {
+      bad = apply_value_options (args, from, out->u.plot);
+      if (bad != NULL)
+        {
+          m42_value_unref (out);
+          return bad;
+        }
+    }
+  return out;
+}
+
+/* TopologicalSort[{1 -> 2, 2 -> 3}]: the vertices in an order that
+ * follows every edge. */
+static M42Value *
+topological_sort (GPtrArray *args)
+{
+  g_autoptr (Network) g = NULL;
+  M42Value *bad = network_build (args, NETWORK_EDGES, &g);
+  g_autoptr (GArray) order = g_array_new (FALSE, TRUE, sizeof (guint));
+  g_autoptr (GArray) layer = g_array_new (FALSE, TRUE, sizeof (int));
+  M42Value *out;
+
+  if (bad != NULL)
+    return bad;
+  if (!network_topological (g, order, layer))
+    return m42_value_error ("TopologicalSort: the graph has a cycle or an edge with no direction, so there is no such order");
+  out = m42_value_list_new ();
+  for (guint i = 0; i < order->len; i++)
+    m42_value_list_append (out, m42_value_ref (g_ptr_array_index (g->values,
+                                                                  g_array_index (order, guint, i))));
+  return out;
+}
+
 /* Show[p, q]: the graphs laid over one another, which is how two
  * curves from different calls end up on one picture. */
 static M42Value *
@@ -10581,7 +11993,7 @@ collect_values (GPtrArray *args, GPtrArray *out)
           if (!ok)
             return FALSE;
         }
-      else if (is_num (v) || v->kind == M42_VALUE_BIGINT)
+      else if (is_num (v) || v->kind == M42_VALUE_BIGINT || v->kind == M42_VALUE_COMPLEX)
         g_ptr_array_add (out, v);
       else
         return FALSE;
@@ -16942,6 +18354,16 @@ eval_call (M42Session *s, const M42Node *n)
     r = list_plot_with_options (args, M42_SERIES_STAIRS, FALSE);
   else if (name_is (name, "Show", NULL))
     r = show_plots (args);
+  else if (name_is (name, "Graph", "GraphPlot"))
+    r = network_graph (args, NETWORK_EDGES);
+  else if (name_is (name, "AdjacencyGraph", NULL))
+    r = network_graph (args, NETWORK_MATRIX);
+  else if (name_is (name, "digraph", NULL))
+    r = network_graph (args, NETWORK_MATLAB_DIRECTED);
+  else if (name_is (name, "graph", NULL))
+    r = network_graph (args, NETWORK_MATLAB);
+  else if (name_is (name, "TopologicalSort", "toposort"))
+    r = topological_sort (args);
   else if (name_is (name, "Histogram", "hist"))
     r = list_plot_with_options (args, M42_SERIES_BARS, TRUE);
   else if (name_is (name, "plot", NULL))

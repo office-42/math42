@@ -310,22 +310,25 @@ M42Big *
 m42_big_divide_small (const M42Big *a, gint64 d, gint64 *remainder)
 {
   M42Big *out;
-  gint64 carry = 0;
-  gint64 size = d < 0 ? -d : d;
+  guint64 carry = 0;
+  guint64 size = d < 0 ? -(guint64) d : (guint64) d;
 
   if (d == 0)
     return NULL;
   out = big_alloc (a->len);
   for (guint i = a->len; i > 0; i--)
     {
-      gint64 current = carry * M42_BIG_BASE + a->digit[i - 1];
+      /* The carry is below the divisor, which may be anything up to
+       * 2^63, so the step needs more than 64 bits: Mod[10^40, 2^62]
+       * came out negative when it was done in a gint64. */
+      unsigned __int128 current = (unsigned __int128) carry * M42_BIG_BASE + a->digit[i - 1];
 
       out->digit[i - 1] = (guint32) (current / size);
-      carry = current % size;
+      carry = (guint64) (current % size);
     }
   out->sign = a->sign == 0 ? 0 : (d < 0 ? -a->sign : a->sign);
   if (remainder != NULL)
-    *remainder = a->sign < 0 ? -carry : carry;
+    *remainder = a->sign < 0 ? -(gint64) carry : (gint64) carry;
   return big_trim (out);
 }
 

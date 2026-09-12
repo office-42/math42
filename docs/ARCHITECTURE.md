@@ -49,6 +49,13 @@ multiplies a number by an expression, `map2` sees that one side is an
 expression and builds a tree, and `m42_node_simplify` tidies it. The
 same trees are what `D` differentiates and `Integrate` integrates.
 
+`Series` does not differentiate its way to the coefficients, which
+doubles the size of the derivative of a quotient at every order: it
+works in truncated power series, arrays of exact coefficients in
+`x - a` that are added, multiplied, divided, raised and composed to the
+order asked for, with the derivatives kept for a function the
+arithmetic does not know.
+
 Numbers are doubles, but a whole one — and a quotient of two whole
 ones — carries the fraction it really is in a `gint64` pair beside the
 double, so `1/3 + 1/6` is exactly `1/2`. `exact_op` does that

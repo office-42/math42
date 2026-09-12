@@ -14,6 +14,8 @@ Sin[a + b] /. Sin[u_ + v_] -> Sin[u] Cos[v] + Cos[u] Sin[v]
 Plot[{Sin[x], Sin[x]^3}, {x, 0, 2 Pi}, PlotLabel -> "a sine and its cube"]
 StreamPlot[{-y, x}, {x, -2, 2}, {y, -2, 2}, PlotLabel -> "a turning field"]
 Plot3D[Sin[x] Cos[y], {x, -3, 3}, {y, -3, 3}]
+(* A graph in the other sense is drawn too, a directed acyclic one in layers. *)
+Graph[{1 -> 2, 1 -> 3, 2 -> 4, 2 -> 6, 3 -> 6, 4 -> 12, 6 -> 12}, PlotLabel -> "the divisors of 12"]
 (* And the answers come out as mathematics. *)
 Integrate[Sqrt[1 - x^2], x]
 DSolve[y'' + 4 y == Sin[x], y, x]

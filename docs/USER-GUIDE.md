@@ -155,7 +155,9 @@ cells, structures or objects.
 `.nb` — gives the lines it holds, a MATLAB script's comments and
 continuations put right and a Mathematica notebook's cells read out of
 the boxes they are written in. `ToExpression` runs one of them. An expression
-spread over several lines is put back together as the file is read.
+spread over several lines is put back together as the file is read, and
+so is a MATLAB `if`, `for` or `while` block laid out one statement to a
+line down to its `end`.
 
 From a terminal, `math42-calc script.m` runs any of them, and
 `math42 --convert out.nb notebook.m42` turns one into another without
@@ -365,8 +367,10 @@ if x > 5, disp("big"); elseif x > 2, disp("middling"); else, disp("small"); end
 ```
 
 A block written on one line wants a comma or a semicolon after its
-header, exactly as MATLAB wants one. `for i = list` walks a list; a
-single value runs the body once.
+header, exactly as MATLAB wants one, and the condition may be in
+brackets: `if (x > 0), y = 1; end`. In a `.m` file a block may be laid
+out over several lines, as a script has it, and is read as one. `for i =
+list` walks a list; a single value runs the body once.
 
 ### Patterns
 
@@ -658,7 +662,8 @@ which is Binet's formula for the Fibonacci numbers.
 ```
 In[23]:= Integrate[x Exp[x], x]        Out[23]= x Exp[x] - Exp[x]
 In[24]:= Integrate[1/(2u + 1), u]      Out[24]= Log[Abs[2 u + 1]]/2
-In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + 1/2 u^2 + 1/6 u^3 + 1/24 u^4
+In[25]:= Series[Exp[u], {u, 0, 4}]     Out[25]= 1 + u + u^2/2 + u^3/6 + u^4/24
+In[26]:= Series[Tan[x], {x, 0, 7}]     Out[26]= x + x^3/3 + 2 x^5/15 + 17 x^7/315
 ```
 
 ### Algebra
@@ -1029,6 +1034,10 @@ In[s4]:= IntegerString[255, 16]                    Out[s4]= "ff"
 | `ParametricPlot3D[{x, y, z}, {t, a, b}]` | a curve through space |
 | `VectorPlot[{p, q}, {x, a, b}, {y, c, d}]`, `quiver` | which way a field points at each place — the direction field of `y' = f(x, y)` is `VectorPlot[{1, f}, …]` |
 | `StreamPlot[{p, q}, {x, a, b}, {y, c, d}]` | the same field drawn as the lines a speck of dust would follow through it |
+| `Graph[{1 -> 2, 2 -> 3}]`, `GraphPlot` | a graph in the other sense of the word, its vertices and edges drawn: a rule is an edge with an arrow, `UndirectedEdge[a, b]` or `{a, b}` one without, and a vertex on its own is drawn alone. A directed acyclic graph is laid out in layers from its sources down; anything else is laid out by springs |
+| `AdjacencyGraph[m]` | the graph a square matrix describes, drawn; a symmetric matrix gives edges with no arrows |
+| `digraph(s, t)`, `graph(s, t)` | MATLAB's graph from the lists of where its edges start and end, drawn at once |
+| `TopologicalSort[{1 -> 2, 2 -> 3}]`, `toposort` | the vertices in an order that follows every edge, or a complaint when a cycle means there is none |
 | `RegionPlot[cond, {x, a, b}, {y, c, d}]` | the part of the plane where a condition holds, shaded: `RegionPlot[y > x^2 && y < x + 2, …]` |
 | `DensityPlot[f, {x, a, b}, {y, c, d}]` | the same surface looked straight down on, painted by height |
 | `ListPlot3D[grid]`, `ListContourPlot[grid]`, `ListDensityPlot[grid]` | the same three from a grid of heights rather than from a function |

@@ -70,9 +70,24 @@ typedef struct {
   double  xmin, xmax, ymin, ymax, zmin, zmax;
 } M42Curve3D;
 
+/* A graph in the other sense of the word: a vertex with its name and
+ * its place in the unit square, and an edge between two of them, with
+ * an arrow on it when it has a direction. */
+typedef struct {
+  char  *label;
+  double x, y;
+} M42Vertex;
+
+typedef struct {
+  guint    from, to;
+  gboolean directed;
+} M42Edge;
+
 typedef struct {
   GPtrArray *series;   /* of M42Series* */
   GPtrArray *curves;   /* of M42Curve3D*, when it is a curve through space */
+  GPtrArray *vertices; /* of M42Vertex*, when it is a graph of vertices and edges */
+  GArray    *edges;    /* of M42Edge */
   /* A field of arrows: x, y, dx, dy and how long the arrow was before
    * it was cut down to fit, four and a bit doubles at a time.  What is
    * drawn is the direction; the length says how strong. */
@@ -156,6 +171,10 @@ M42Contour *m42_plot_add_contour (M42Plot *plot, double level, guint which, guin
 M42Curve3D *m42_plot_add_curve3d (M42Plot *plot);
 /* One arrow of a field: where it starts, which way it goes once it has
  * been cut down to fit, and how strong it was, from 0 to 1. */
+/* A vertex, by name and place; the index it gets is what an edge
+ * names it by. */
+guint       m42_plot_add_vertex (M42Plot *plot, const char *label, double x, double y);
+void        m42_plot_add_edge (M42Plot *plot, guint from, guint to, gboolean directed);
 void        m42_plot_add_arrow (M42Plot *plot, double x, double y,
                                 double dx, double dy, double strength);
 void        m42_curve3d_add_point (M42Curve3D *c, double x, double y, double z);

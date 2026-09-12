@@ -259,8 +259,9 @@ read_matrix (Reader *r, gsize end, char **name)
     class_of = flags & 0xff;
   }
 
-  /* The shape. */
-  if (!element_head (r, &kind, &bytes, &is_short))
+  /* The shape.  An element that claims more bytes than the file has
+   * left is a broken file, not a request for that much memory. */
+  if (!element_head (r, &kind, &bytes, &is_short) || bytes > r->len - r->at)
     return NULL;
   ndims = bytes / 4;
   shape = g_new0 (guint32, MAX (ndims, 2u));
@@ -277,7 +278,7 @@ read_matrix (Reader *r, gsize end, char **name)
   skip_padding (r, bytes, is_short);
 
   /* The numbers, or the letters. */
-  if (!element_head (r, &kind, &bytes, &is_short))
+  if (!element_head (r, &kind, &bytes, &is_short) || bytes > r->len - r->at)
     return NULL;
   {
     guint rows = ndims > 0 ? shape[0] : 0;
@@ -285,8 +286,10 @@ read_matrix (Reader *r, gsize end, char **name)
     gsize how_many = (gsize) rows * cols;
     gsize have = size_of (kind) > 0 ? bytes / size_of (kind) : 0;
 
+    /* A matrix cut short by the file's end is not read as far as it
+     * goes and then filled from whatever memory comes next. */
     if (how_many > have)
-      how_many = have;
+      return NULL;
     if (class_of == MX_CHAR)
       {
         g_autoptr (GString) text = g_string_new (NULL);

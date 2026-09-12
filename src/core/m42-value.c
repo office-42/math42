@@ -116,6 +116,10 @@ m42_value_rational (gint64 num, gint64 den)
 
   if (den == 0)
     return m42_value_real (num == 0 ? NAN : (num > 0 ? INFINITY : -INFINITY));
+  /* -2^63 has no negative, so a fraction with it on either side is
+   * left to the doubles rather than printed as -1/-9223372036854775808. */
+  if (num == G_MININT64 || den == G_MININT64)
+    return m42_value_real ((double) num / (double) den);
   if (den < 0)
     {
       num = -num;
@@ -178,8 +182,17 @@ contour_free (M42Contour *c)
 }
 
 static void
+vertex_free (M42Vertex *v)
+{
+  g_free (v->label);
+  g_free (v);
+}
+
+static void
 plot_free (M42Plot *p)
 {
+  g_clear_pointer (&p->vertices, g_ptr_array_unref);
+  g_clear_pointer (&p->edges, g_array_unref);
   g_clear_pointer (&p->contours, g_ptr_array_unref);
   g_clear_pointer (&p->curves, g_ptr_array_unref);
   g_clear_pointer (&p->arrows, g_array_unref);
@@ -325,6 +338,30 @@ m42_plot_add_series (M42Plot *plot, M42SeriesKind kind)
   s->r = c[0]; s->g = c[1]; s->b = c[2];
   g_ptr_array_add (plot->series, s);
   return s;
+}
+
+guint
+m42_plot_add_vertex (M42Plot *plot, const char *label, double x, double y)
+{
+  M42Vertex *v = g_new0 (M42Vertex, 1);
+
+  v->label = g_strdup (label);
+  v->x = x;
+  v->y = y;
+  if (plot->vertices == NULL)
+    plot->vertices = g_ptr_array_new_with_free_func ((GDestroyNotify) vertex_free);
+  g_ptr_array_add (plot->vertices, v);
+  return plot->vertices->len - 1;
+}
+
+void
+m42_plot_add_edge (M42Plot *plot, guint from, guint to, gboolean directed)
+{
+  M42Edge e = { from, to, directed };
+
+  if (plot->edges == NULL)
+    plot->edges = g_array_new (FALSE, FALSE, sizeof (M42Edge));
+  g_array_append_val (plot->edges, e);
 }
 
 void
@@ -497,7 +534,10 @@ m42_number_to_string (GString *out, double x)
     g_string_append (out, "Indeterminate");
   else if (isinf (x))
     g_string_append (out, x > 0 ? "Infinity" : "-Infinity");
-  else if (x == floor (x) && fabs (x) < 1e15)
+  /* A whole number is written out in full as far as a gint64 reaches,
+   * as an exact one would be: x^18/6402373705728000 in a series, not
+   * x^18/6.402373705728e+15. */
+  else if (x == floor (x) && fabs (x) < 9.2e18)
     g_string_append_printf (out, "%.0f", x == 0 ? 0.0 : x);
   else
     g_string_append (out, g_ascii_formatd (buf, sizeof buf, "%.15g", x));

@@ -46,12 +46,33 @@ run_line (M42Session *session, const char *line, int n)
   fflush (stdout);
 }
 
+/* A line from stdin however long it is, or NULL at the end.  A fixed
+ * buffer cut a long list into two lines, each a syntax error. */
+static char *
+read_line (FILE *in)
+{
+  GString *line = g_string_new (NULL);
+  char chunk[4096];
+
+  while (fgets (chunk, sizeof chunk, in) != NULL)
+    {
+      g_string_append (line, chunk);
+      if (line->str[line->len - 1] == '\n')
+        break;
+    }
+  if (line->len == 0)
+    {
+      g_string_free (line, TRUE);
+      return NULL;
+    }
+  return g_string_free (line, FALSE);
+}
+
 int
 main (int argc, char *argv[])
 {
   g_autoptr (M42Session) session = m42_session_new ();
   gboolean interactive = INTERACTIVE ();
-  char line[4096];
 
   if (argc > 1 && (strcmp (argv[1], "--version") == 0 || strcmp (argv[1], "-v") == 0))
     {
@@ -89,15 +110,15 @@ main (int argc, char *argv[])
   for (;;)
     {
       int n = m42_session_next_line (session);
-      g_autoptr (M42Value) result = NULL;
-      g_autofree char *text = NULL;
+      g_autofree char *line = NULL;
 
       if (interactive)
         {
           printf ("In[%d]:= ", n);
           fflush (stdout);
         }
-      if (fgets (line, sizeof line, stdin) == NULL)
+      line = read_line (stdin);
+      if (line == NULL)
         break;
       g_strstrip (line);
       if (line[0] == '\0')

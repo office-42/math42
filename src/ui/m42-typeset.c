@@ -342,7 +342,7 @@ box_call (GtkWidget *w, const M42Node *n, double size)
   if (!strcmp (f, "Not") && n->children->len == 1)
     {
       row = box_row (size);
-      row_add (row, box_text (w, "Â¬", size));
+      row_add (row, box_text (w, "\302\254", size));
       row_add (row, box_from_node (w, m42_node_child (n, 0), size, 9));
       return row;
     }
@@ -527,7 +527,14 @@ box_from_node (GtkWidget *w, const M42Node *n, double size, int parent_prec)
           }
         {
           M42Box *row = box_row (size);
-          row_add (row, maybe_fence (box_child (w, a, size, prec), a, prec));
+
+          /* A negative number in front of a product is its sign, -3 t,
+           * not a factor to be fenced as (-3) t; anywhere else in one
+           * it is fenced. */
+          if (n->op == M42_TOK_STAR && a->kind == M42_NODE_NUMBER)
+            row_add (row, box_child (w, a, size, prec));
+          else
+            row_add (row, maybe_fence (box_child (w, a, size, prec), a, prec));
           if (n->op == M42_TOK_STAR)
             row_add (row, box_text (w, c->kind == M42_NODE_NUMBER ? " \303\227 " : "\342\200\211", size));
           else
@@ -1221,6 +1228,112 @@ draw_surface (const M42Plot *p, cairo_t *cr, double x0, double y0, double w, dou
 #undef GRID_Z
 }
 
+/* --- graphs of vertices and edges ------------------------------------------
+ *
+ * Each vertex is a disc with its name in it, wide enough for the name;
+ * each edge a line from the rim of one disc to the rim of the other,
+ * with a filled head on the end when it points somewhere. */
+static void
+draw_network (const M42Plot *p, cairo_t *cr, PangoFontDescription *desc,
+              double x0, double y0, double w, double h)
+{
+  guint n = p->vertices->len;
+  g_autofree double *cx = g_new0 (double, n);
+  g_autofree double *cy = g_new0 (double, n);
+  g_autofree double *radius = g_new0 (double, n);
+  PangoLayout *label = pango_cairo_create_layout (cr);
+  const double margin = 22;
+
+  pango_layout_set_font_description (label, desc);
+
+  /* Where each disc goes and how big it is. */
+  for (guint v = 0; v < n; v++)
+    {
+      const M42Vertex *vertex = g_ptr_array_index (p->vertices, v);
+      int tw, th;
+
+      pango_layout_set_text (label, vertex->label, -1);
+      pango_layout_get_pixel_size (label, &tw, &th);
+      cx[v] = x0 + margin + vertex->x * (w - 2 * margin);
+      cy[v] = y0 + margin + vertex->y * (h - 2 * margin);
+      radius[v] = MAX (11.0, hypot (tw / 2.0 + 5, th / 2.0 + 2));
+    }
+
+  /* The edges first, so that the discs cover their ends. */
+  if (p->edges != NULL)
+    for (guint e = 0; e < p->edges->len; e++)
+      {
+        const M42Edge *edge = &g_array_index (p->edges, M42Edge, e);
+        double dx, dy, len, ux, uy, ax, ay, bx, by;
+
+        if (edge->from >= n || edge->to >= n || edge->from == edge->to)
+          continue;
+        dx = cx[edge->to] - cx[edge->from];
+        dy = cy[edge->to] - cy[edge->from];
+        len = hypot (dx, dy);
+        if (len < radius[edge->from] + radius[edge->to] + 2)
+          continue;
+        ux = dx / len;
+        uy = dy / len;
+        ax = cx[edge->from] + ux * radius[edge->from];
+        ay = cy[edge->from] + uy * radius[edge->from];
+        bx = cx[edge->to] - ux * (radius[edge->to] + (edge->directed ? 1 : 0));
+        by = cy[edge->to] - uy * (radius[edge->to] + (edge->directed ? 1 : 0));
+
+        cairo_set_source_rgb (cr, 0.42, 0.47, 0.58);
+        cairo_set_line_width (cr, 1.3);
+        cairo_move_to (cr, ax, ay);
+        cairo_line_to (cr, edge->directed ? bx - ux * 7 : bx, edge->directed ? by - uy * 7 : by);
+        cairo_stroke (cr);
+        if (edge->directed)
+          {
+            /* A filled head, nine long and seven wide. */
+            double nx = -uy, ny = ux;
+
+            cairo_move_to (cr, bx, by);
+            cairo_line_to (cr, bx - ux * 9 + nx * 3.5, by - uy * 9 + ny * 3.5);
+            cairo_line_to (cr, bx - ux * 9 - nx * 3.5, by - uy * 9 - ny * 3.5);
+            cairo_close_path (cr);
+            cairo_fill (cr);
+          }
+      }
+
+  /* Then the discs, each with its name. */
+  for (guint v = 0; v < n; v++)
+    {
+      const M42Vertex *vertex = g_ptr_array_index (p->vertices, v);
+      int tw, th;
+
+      /* A fresh path: an arc joins on to the current point, which the
+       * last name left behind, with a line. */
+      cairo_new_path (cr);
+      cairo_arc (cr, cx[v], cy[v], radius[v], 0, 2 * G_PI);
+      cairo_set_source_rgb (cr, 0.91, 0.94, 0.99);
+      cairo_fill_preserve (cr);
+      cairo_set_source_rgb (cr, 0.25, 0.40, 0.70);
+      cairo_set_line_width (cr, 1.2);
+      cairo_stroke (cr);
+
+      pango_layout_set_text (label, vertex->label, -1);
+      pango_layout_get_pixel_size (label, &tw, &th);
+      cairo_set_source_rgb (cr, 0.12, 0.14, 0.20);
+      cairo_move_to (cr, cx[v] - tw / 2.0, cy[v] - th / 2.0);
+      pango_cairo_show_layout (cr, label);
+    }
+
+  if (p->title != NULL)
+    {
+      int tw, th;
+
+      pango_layout_set_text (label, p->title, -1);
+      pango_layout_get_pixel_size (label, &tw, &th);
+      cairo_set_source_rgb (cr, 0.2, 0.2, 0.2);
+      cairo_move_to (cr, (PLOT_W - tw) / 2.0, 0);
+      pango_cairo_show_layout (cr, label);
+    }
+  g_object_unref (label);
+}
+
 static void
 draw_plot (const M42Box *b, cairo_t *cr, double x0, double y0)
 {
@@ -1241,6 +1354,16 @@ draw_plot (const M42Box *b, cairo_t *cr, double x0, double y0)
   cairo_set_source_rgb (cr, 1, 1, 1);
   cairo_rectangle (cr, L, T, w, h);
   cairo_fill (cr);
+
+  /* A graph of vertices and edges has no axes: the picture is the
+   * vertices where the layout put them, with the edges between. */
+  if (p->vertices != NULL)
+    {
+      draw_network (p, cr, desc, 8, T + 4, PLOT_W - 16, PLOT_H - T - 12);
+      pango_font_description_free (desc);
+      cairo_restore (cr);
+      return;
+    }
 
   /* A curve through space is drawn in the projection too. */
   if (p->curves != NULL && p->curves->len > 0)
@@ -1338,8 +1461,18 @@ draw_plot (const M42Box *b, cairo_t *cr, double x0, double y0)
       if (logarithmic)
         step = MAX (1.0, round (step));
 
-      for (double t = ceil (lo / step) * step; t <= hi + step * 1e-6; t += step)
+      /* Counted from the first tick in a small whole number of steps
+       * rather than by adding the step to t: around 10^16 a step of
+       * 0.5 is smaller than the gap between one double and the next,
+       * and t += step went nowhere, for ever.  Plot[10^16 + Sin[x],
+       * {x, 0, 1}] hung the window. */
+      double first = ceil (lo / step), last = floor ((hi + step * 1e-6) / step);
+      int count = isfinite (first) && isfinite (last) && last - first <= 1000
+        ? (int) (last - first) : -1;
+
+      for (int k = 0; k <= count; k++)
         {
+          double t = (first + k) * step;
           g_autoptr (GString) text = g_string_new (NULL);
           int tw, th;
           double v = fabs (t) < step * 1e-9 ? 0 : t;

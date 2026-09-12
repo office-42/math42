@@ -4122,6 +4122,99 @@ laplace_of (const M42Node *n, const char *t, const char *sname, int depth)
     }
 }
 
+/* A polynomial, lowest power first, at x, by Horner. */
+static double
+poly_at (const GArray *p, double x)
+{
+  double y = 0;
+
+  for (guint i = p->len; i > 0; i--)
+    y = y * x + g_array_index (p, double, i - 1);
+  return y;
+}
+
+/* A real root of a polynomial, found by scanning for a change of sign
+ * and closing in on it; FALSE when the scan finds none. */
+static gboolean
+real_root_of (const GArray *p, double *root)
+{
+  double previous = 0;
+  gboolean have_previous = FALSE;
+
+  for (double x = -50; x <= 50; x += 0.05)
+    {
+      double y = poly_at (p, x);
+
+      if (have_previous && ((y == 0) || ((y < 0) != (previous < 0))))
+        {
+          double lo = x - 0.05, hi = x, flo = previous;
+
+          for (int k = 0; k < 80; k++)
+            {
+              double mid = (lo + hi) / 2, fm = poly_at (p, mid);
+
+              if ((fm < 0) == (flo < 0))
+                {
+                  lo = mid;
+                  flo = fm;
+                }
+              else
+                hi = mid;
+            }
+          *root = (lo + hi) / 2;
+          return TRUE;
+        }
+      previous = y;
+      have_previous = TRUE;
+    }
+  return FALSE;
+}
+
+/* A root that is nearly a whole number, a half, a third or a quarter
+ * is taken to be that number when the polynomial agrees.  Closing in
+ * on a repeated root only gets within the cube root of the machine's
+ * precision, which is far too rough to divide it out with. */
+static void
+snap_root (const GArray *p, double *root)
+{
+  static const int DENOMINATORS[] = { 1, 2, 3, 4, 5, 6, 8, 10 };
+  double best = *root, best_value = fabs (poly_at (p, *root));
+
+  for (guint i = 0; i < G_N_ELEMENTS (DENOMINATORS); i++)
+    {
+      double d = DENOMINATORS[i];
+      double candidate = round (*root * d) / d;
+      double value = fabs (poly_at (p, candidate));
+
+      if (fabs (candidate - *root) < 1e-3 && value <= best_value)
+        {
+          best = candidate;
+          best_value = value;
+        }
+    }
+  *root = best;
+}
+
+/* p divided by (s - root), the remainder thrown away; FALSE for a
+ * constant, which cannot be divided. */
+static gboolean
+deflate_by_root (GArray *p, double root)
+{
+  guint m = p->len;
+  g_autoptr (GArray) q = g_array_new (FALSE, TRUE, sizeof (double));
+
+  if (m < 2)
+    return FALSE;
+  g_array_set_size (q, m - 1);
+  g_array_index (q, double, m - 2) = g_array_index (p, double, m - 1);
+  for (guint i = m - 2; i > 0; i--)
+    g_array_index (q, double, i - 1) =
+      g_array_index (p, double, i) + root * g_array_index (q, double, i);
+  g_array_set_size (p, m - 1);
+  memcpy (p->data, q->data, sizeof (double) * (m - 1));
+  return TRUE;
+}
+
 /* Backwards, by the same table read the other way: what is in s comes
  * back as what it was in t.  A quotient of polynomials is split into
  * partial fractions first, which is how it is done by hand. */
@@ -4198,121 +4291,97 @@ inverse_laplace_of (const M42Node *n, const char *sname, const char *t, int dept
     {
       /* A denominator of higher degree is split at a real root -- every
        * real polynomial of odd degree has one, and the ones a course
-       * sets have them anyway -- into a linear piece and the rest,
-       * each of which the table above knows.  This is the partial
-       * fractions of a Laplace exercise, done the way it is by hand. */
-      double root;
-      gboolean found = FALSE;
+       * sets have them anyway -- into the powers of that linear piece
+       * and the rest, each of which the table above knows.  This is
+       * the partial fractions of a Laplace exercise, done the way it
+       * is by hand: the root may be a repeated one, and then every
+       * power of (s - r) up to its multiplicity gets a coefficient,
+       * peeled off from the highest down.  A double root does not
+       * change the sign of the bottom, so it is looked for where the
+       * derivative does instead. */
+      double root, scale = 0;
+      guint multiplicity = 0;
       g_autoptr (GArray) rest = g_array_new (FALSE, TRUE, sizeof (double));
-      double numerator_at_root = 0, rest_at_root = 0;
+      g_autoptr (GArray) top = g_array_new (FALSE, TRUE, sizeof (double));
+      g_autoptr (GArray) slope = g_array_new (FALSE, TRUE, sizeof (double));
+      M42Node *out = NULL;
 
-      {
-        /* A root, by scanning for a change of sign and closing in. */
-        double previous = 0;
-        gboolean have_previous = FALSE;
+      for (guint i = 0; i < den->len; i++)
+        scale = MAX (scale, fabs (g_array_index (den, double, i)));
+      g_array_set_size (slope, den->len - 1);
+      for (guint i = 1; i < den->len; i++)
+        g_array_index (slope, double, i - 1) = i * g_array_index (den, double, i);
 
-        for (double x = -50; x <= 50 && !found; x += 0.05)
-          {
-            double y = 0;
-
-            for (guint i = den->len; i > 0; i--)
-              y = y * x + g_array_index (den, double, i - 1);
-            if (have_previous && ((y == 0) || ((y < 0) != (previous < 0))))
-              {
-                double lo = x - 0.05, hi = x, flo = previous;
-
-                for (int k = 0; k < 80; k++)
-                  {
-                    double mid = (lo + hi) / 2, fm = 0;
-
-                    for (guint i = den->len; i > 0; i--)
-                      fm = fm * mid + g_array_index (den, double, i - 1);
-                    if ((fm < 0) == (flo < 0))
-                      {
-                        lo = mid;
-                        flo = fm;
-                      }
-                    else
-                      hi = mid;
-                  }
-                root = (lo + hi) / 2;
-                if (fabs (root - round (root)) < 1e-9)
-                  root = round (root);
-                found = TRUE;
-              }
-            previous = y;
-            have_previous = TRUE;
-          }
-      }
-      if (!found)
+      if (!real_root_of (den, &root) &&
+          !(real_root_of (slope, &root) && fabs (poly_at (den, root)) < 1e-7 * scale))
         return NULL;
+      snap_root (den, &root);
 
-      /* Divide the root out: den = (s - root) rest. */
-      {
-        guint m = den->len - 1;
-
-        g_array_set_size (rest, m);
-        g_array_index (rest, double, m - 1) = g_array_index (den, double, m);
-        for (guint i = m - 1; i > 0; i--)
-          g_array_index (rest, double, i - 1) =
-            g_array_index (den, double, i) + root * g_array_index (rest, double, i);
-      }
-
-      /* A = N(root)/rest(root), the coefficient of the linear piece. */
-      for (guint i = num->len; i > 0; i--)
-        numerator_at_root = numerator_at_root * root + g_array_index (num, double, i - 1);
-      for (guint i = rest->len; i > 0; i--)
-        rest_at_root = rest_at_root * root + g_array_index (rest, double, i - 1);
-      if (fabs (rest_at_root) < 1e-12)
-        return NULL;
-
-      {
-        double a_coefficient = numerator_at_root / rest_at_root;
-        g_autoptr (GArray) remainder = g_array_new (FALSE, TRUE, sizeof (double));
-        M42Node *first, *second;
-
-        /* What is left: (N(s) - A rest(s)) / ((s - root) rest(s)), whose
-         * top has (s - root) as a factor. */
-        g_array_set_size (remainder, MAX (num->len, rest->len));
-        for (guint i = 0; i < remainder->len; i++)
-          {
-            double n_i = i < num->len ? g_array_index (num, double, i) : 0;
-            double r_i = i < rest->len ? g_array_index (rest, double, i) : 0;
-
-            g_array_index (remainder, double, i) = n_i - a_coefficient * r_i;
-          }
-        /* Divide that top by (s - root). */
+      /* Divide the root out as often as it goes: den = (s - r)^m rest. */
+      g_array_set_size (rest, den->len);
+      memcpy (rest->data, den->data, sizeof (double) * den->len);
+      while (rest->len > 1 && fabs (poly_at (rest, root)) < 1e-7 * scale)
         {
-          guint m = remainder->len;
-          g_autoptr (GArray) quotient = g_array_new (FALSE, TRUE, sizeof (double));
-
-          if (m < 2)
-            return NULL;
-          g_array_set_size (quotient, m - 1);
-          g_array_index (quotient, double, m - 2) = g_array_index (remainder, double, m - 1);
-          for (guint i = m - 2; i > 0; i--)
-            g_array_index (quotient, double, i - 1) =
-              g_array_index (remainder, double, i) + root * g_array_index (quotient, double, i);
-
-          /* A/(s - root), and the rest over what is left of the bottom. */
-          {
-            g_autoptr (M42Node) linear = SUB (m42_node_ident (sname), number_node (root));
-            g_autoptr (M42Node) piece_one = DIV (number_node (a_coefficient), CP (linear));
-            g_autoptr (M42Node) bottom = poly_node (rest, sname);
-            g_autoptr (M42Node) top = poly_node (quotient, sname);
-            g_autoptr (M42Node) piece_two = DIV (CP (top), CP (bottom));
-
-            first = inverse_laplace_of (piece_one, sname, t, depth + 1);
-            second = first != NULL ? inverse_laplace_of (piece_two, sname, t, depth + 1) : NULL;
-            if (second == NULL)
-              {
-                m42_node_free (first);
-                return NULL;
-              }
-            return ADD (first, second);
-          }
+          if (!deflate_by_root (rest, root))
+            break;
+          multiplicity++;
         }
-      }
+      if (multiplicity == 0 || fabs (poly_at (rest, root)) < 1e-12)
+        return NULL;
+
+      /* A_k = N(r)/rest(r) for k = m, m - 1, ... 1, each time taking
+       * A_k rest(s) away from the top and dividing what is left by
+       * (s - r), which goes exactly. */
+      g_array_set_size (top, num->len);
+      memcpy (top->data, num->data, sizeof (double) * num->len);
+      for (guint k = multiplicity; k > 0; k--)
+        {
+          double coefficient = poly_at (top, root) / poly_at (rest, root);
+          M42Node *term;
+
+          if (fabs (coefficient) > 1e-12)
+            {
+              M42Node *growth = CALL ("Exp", MUL (number_node (root), m42_node_ident (t)));
+
+              if (k == 1)
+                term = MUL (number_node (coefficient), growth);
+              else
+                {
+                  M42Node *power = k == 2 ? m42_node_ident (t)
+                                          : POW (m42_node_ident (t), NUM (k - 1));
+
+                  term = MUL (MUL (number_node (coefficient / factorial_of (k - 1)), power),
+                              growth);
+                }
+              out = out == NULL ? term : ADD (out, term);
+            }
+
+          g_array_set_size (top, MAX (top->len, rest->len));
+          for (guint i = 0; i < top->len; i++)
+            g_array_index (top, double, i) -=
+              i < rest->len ? coefficient * g_array_index (rest, double, i) : 0;
+          if (!deflate_by_root (top, root))
+            break;
+        }
+
+      /* What is left over rest(s), if anything is. */
+      while (top->len > 1 && fabs (g_array_index (top, double, top->len - 1)) < 1e-12)
+        g_array_set_size (top, top->len - 1);
+      if (rest->len > 1 && (top->len > 1 || fabs (g_array_index (top, double, 0)) > 1e-12))
+        {
+          g_autoptr (M42Node) bottom = poly_node (rest, sname);
+          g_autoptr (M42Node) numerator = poly_node (top, sname);
+          g_autoptr (M42Node) piece = DIV (CP (numerator), CP (bottom));
+          M42Node *more = inverse_laplace_of (piece, sname, t, depth + 1);
+
+          if (more == NULL)
+            {
+              m42_node_free (out);
+              return NULL;
+            }
+          out = out == NULL ? more : ADD (out, more);
+        }
+      return out != NULL ? out : NUM (0);
     }
 
   if (den->len == 3)
@@ -4327,11 +4396,23 @@ inverse_laplace_of (const M42Node *n, const char *sname, const char *t, int dept
 
       if (disc < -1e-12)
         {
-          /* A shifted sine and cosine. */
+          /* A shifted sine and cosine: the top is p (s - alpha) + (q +
+           * alpha p) over (s - alpha)^2 + beta^2, and the two parts
+           * are the table's shifted cosine and shifted sine.  It used
+           * to take alpha p away instead of adding it, which gave
+           * (s - 2)/((s - 2)^2 + 9) a sine it never had. */
           double beta = sqrt (-disc) / (2 * a);
-          M42Node *wave = ADD (MUL (number_node (p / a), CALL ("Cos", MUL (number_node (beta), m42_node_ident (t)))),
-                               MUL (number_node ((q / a - alpha * p / a) / beta),
-                                    CALL ("Sin", MUL (number_node (beta), m42_node_ident (t)))));
+          double sine = (q + alpha * p) / a / beta;
+          M42Node *wave;
+
+          if (fabs (sine) < 1e-12)
+            wave = MUL (number_node (p / a), CALL ("Cos", MUL (number_node (beta), m42_node_ident (t))));
+          else if (fabs (p) < 1e-12)
+            wave = MUL (number_node (sine), CALL ("Sin", MUL (number_node (beta), m42_node_ident (t))));
+          else
+            wave = ADD (MUL (number_node (p / a), CALL ("Cos", MUL (number_node (beta), m42_node_ident (t)))),
+                        MUL (number_node (sine),
+                             CALL ("Sin", MUL (number_node (beta), m42_node_ident (t)))));
 
           if (fabs (alpha) < 1e-12)
             return wave;
@@ -4347,9 +4428,10 @@ inverse_laplace_of (const M42Node *n, const char *sname, const char *t, int dept
                       MUL (number_node (a2), CALL ("Exp", MUL (number_node (r2), m42_node_ident (t)))));
         }
       {
-        /* A repeated root: (A + B t) e^(rt). */
+        /* A repeated root: (p s + q)/(a (s - r)^2) is p/a over (s - r)
+         * and (q + p r)/a over (s - r)^2, which is (A + B t) e^(rt). */
         double r = alpha;
-        M42Node *bracket = ADD (number_node (p / a), MUL (number_node ((q - p * r) / a), m42_node_ident (t)));
+        M42Node *bracket = ADD (number_node (p / a), MUL (number_node ((q + p * r) / a), m42_node_ident (t)));
 
         return MUL (bracket, CALL ("Exp", MUL (number_node (r), m42_node_ident (t))));
       }

@@ -238,8 +238,17 @@ m42_lexer_next (M42Lexer *lx)
     case '\\': t = simple (M42_TOK_BACKSLASH, start); break;
     case '\'': t = simple (M42_TOK_QUOTE, start); break;
     default:
-      t = simple (M42_TOK_ERROR, start);
-      t.text = g_strdup_printf ("unexpected character '%c'", s[start]);
+      {
+        /* The whole character, which may be several bytes: cutting a
+         * UTF-8 sequence after its first byte made a message the
+         * window could not even draw. */
+        const char *next = g_utf8_find_next_char (s + start, NULL);
+        g_autofree char *whole = g_strndup (s + start, next != NULL && next > s + start
+                                                       ? (gsize) (next - (s + start)) : 1);
+
+        t = simple (M42_TOK_ERROR, start);
+        t.text = g_strdup_printf ("unexpected character '%s'", whole);
+      }
       break;
     }
 #undef TWO

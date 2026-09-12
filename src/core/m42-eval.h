@@ -30,6 +30,9 @@ char *m42_session_take_printed (M42Session *s);
 
 /* Forgets every user-defined variable and function. */
 void m42_session_clear (M42Session *s);
+/* Forgets everything, functions included, and starts counting from
+ * In[1] again: what opening another notebook wants. */
+void m42_session_restart (M42Session *s);
 
 /* The number of the next In[n], starting at 1. */
 int m42_session_next_line (M42Session *s);

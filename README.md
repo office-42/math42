@@ -189,7 +189,13 @@ powers of ten,
 `StairsPlot`/`stairs`, `Show` for graphs laid over one another, and
 MATLAB's `plot(x, y)` — drawn with Cairo, with ticks that land on round
 numbers. Each takes `PlotLabel -> "a title"`,
-`AxesLabel -> {"x", "y"}` and `PlotRange -> {lo, hi}`.
+`AxesLabel -> {"x", "y"}` and `PlotRange -> {lo, hi}`. A graph in the
+other sense of the word is drawn as well: `Graph[{1 -> 2, 2 -> 3}]`
+lays a directed acyclic graph out in layers from its sources down and
+anything else by springs, with `UndirectedEdge[a, b]` or `{a, b}` for
+an edge with no arrow, `AdjacencyGraph[m]` for the graph a matrix
+describes, MATLAB's `digraph(s, t)` and `graph(s, t)`, and
+`TopologicalSort` for the order the edges dictate.
 
 **Strings.** `"quoted text"` is a value and `Print["x is ", x]` writes
 it above the result. `StringJoin`, `StringLength`, `StringTake`,
@@ -250,8 +256,9 @@ name:
 | `.nb` | a Mathematica notebook: math42 reads the input cells out of one and writes one made of them |
 
 An expression spread over several lines is put back together as it is
-read, so a file may be laid out however you like. All three go round
-and come back the same:
+read, and so is a MATLAB `if`, `for` or `while` block written one
+statement to a line, so a file may be laid out however you like. All
+three go round and come back the same:
 
 ```
 math42 --convert out.nb notebook.m42     # write a Mathematica notebook
@@ -265,9 +272,10 @@ Four notebooks to open with File > Open, or to run from a terminal as
 `math42 examples/showcase.m42`:
 
 - `examples/showcase.m42` — the page in the picture above: exact
-  arithmetic, MATLAB's brackets, a pattern, three graphs, and an
+  arithmetic, MATLAB's brackets, a pattern, three graphs, an
   integral, a differential equation, the quadratic formula and a
-  series set as mathematics.
+  series set as mathematics, and a directed acyclic graph drawn in
+  layers.
 - `examples/tour.m42` — a page of what math42 does, one line each.
 - `examples/calculus.m42` — derivatives, integrals, limits, series,
   sums, a differential equation, a Laplace transform and a Fourier

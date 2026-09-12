@@ -578,7 +578,12 @@ print_it (M42Notebook *self, const char *title, GtkWindow *parent,
 
   /* math42 draws its own margins, so the printer is asked for as much
    * of the sheet as it will give. */
-  gtk_page_setup_set_paper_size_and_default_margins (setup, gtk_paper_size_new (NULL));
+  {
+    GtkPaperSize *paper = gtk_paper_size_new (NULL);
+
+    gtk_page_setup_set_paper_size_and_default_margins (setup, paper);
+    gtk_paper_size_free (paper);
+  }
   gtk_print_operation_set_default_page_setup (op, setup);
   gtk_print_operation_set_use_full_page (op, FALSE);
   gtk_print_operation_set_unit (op, GTK_UNIT_POINTS);

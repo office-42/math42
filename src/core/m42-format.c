@@ -226,11 +226,67 @@ matlab_line_in (GString *out, const char *line)
     }
 }
 
+/* How many blocks a line opens less how many it closes: if, for,
+ * while, switch, try and function open one and end closes one,
+ * except the end inside brackets, which is the last element of a
+ * list.  Strings and comments, already in math42's spelling, are
+ * passed over. */
+static int
+block_balance (const char *line)
+{
+  static const char *const OPENERS[] = { "if", "for", "while", "switch", "try", "function" };
+  int balance = 0, brackets = 0;
+  const char *at = line;
+
+  while (*at != '\0')
+    {
+      if (*at == '"')
+        {
+          for (at++; *at != '\0' && *at != '"'; at++)
+            if (*at == '\\' && at[1] != '\0')
+              at++;
+          if (*at == '"')
+            at++;
+          continue;
+        }
+      if (at[0] == '(' && at[1] == '*')
+        {
+          const char *close = strstr (at + 2, "*)");
+
+          at = close != NULL ? close + 2 : at + strlen (at);
+          continue;
+        }
+      if (*at == '(' || *at == '[' || *at == '{')
+        brackets++;
+      else if (*at == ')' || *at == ']' || *at == '}')
+        brackets--;
+      if (g_ascii_isalpha (*at) || *at == '_')
+        {
+          const char *start = at;
+          gsize len;
+
+          while (g_ascii_isalnum (*at) || *at == '_')
+            at++;
+          len = at - start;
+          if (len == 3 && strncmp (start, "end", 3) == 0 && brackets <= 0)
+            balance--;
+          for (guint i = 0; i < G_N_ELEMENTS (OPENERS); i++)
+            if (strlen (OPENERS[i]) == len && strncmp (start, OPENERS[i], len) == 0)
+              balance++;
+          continue;
+        }
+      at++;
+    }
+  return balance;
+}
+
 static char *
 matlab_read (const char *contents)
 {
   g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
   g_autoptr (GString) plain = g_string_new (NULL);
+  g_autoptr (GString) block = g_string_new (NULL);
+  int depth = 0;
 
   gboolean in_block = FALSE;
 
@@ -262,10 +318,33 @@ matlab_read (const char *contents)
       if (one->len >= 3 && strcmp (one->str + one->len - 3, "...") == 0)
         {
           g_string_truncate (one, one->len - 3);
-          g_string_append (plain, one->str);
+          g_string_append (block, one->str);
           continue;
         }
-      g_string_append (plain, one->str);
+
+      /* if, for and while spread over several lines, as a script has
+       * them, become the one line math42 reads them as: the lines up
+       * to the matching end joined with commas, if (x > 0), y = 1;
+       * else, y = 2; end.  Read a line at a time, the body of a block
+       * ran whatever the condition said. */
+      if (block->len > 0)
+        {
+          char last = block->str[block->len - 1];
+
+          g_string_append (block, last == ';' || last == ',' || last == ' ' ? " " : ", ");
+        }
+      g_string_append (block, one->str);
+      depth += block_balance (one->str);
+      if (depth > 0)
+        continue;
+      depth = 0;
+      g_string_append (plain, block->str);
+      g_string_append_c (plain, '\n');
+      g_string_truncate (block, 0);
+    }
+  if (block->len > 0)
+    {
+      g_string_append (plain, block->str);
       g_string_append_c (plain, '\n');
     }
   return join_broken_lines (plain->str);
@@ -286,14 +365,14 @@ matlab_write (const char *inputs)
 
       if (line[0] == '\0')
         continue;
-      /* A math42 comment becomes a MATLAB one. */
-      if (g_str_has_prefix (line, "(*"))
+      /* A math42 comment becomes a MATLAB one -- when the line is
+       * nothing but the comment.  (* note *) x = 1 was written as a
+       * comment and the assignment was lost. */
+      if (g_str_has_prefix (line, "(*") && g_str_has_suffix (line, "*)") &&
+          strstr (line + 2, "*)") == line + strlen (line) - 2)
         {
-          g_autofree char *inner = g_strdup (line + 2);
-          char *close = g_strrstr (inner, "*)");
+          g_autofree char *inner = g_strndup (line + 2, strlen (line) - 4);
 
-          if (close != NULL)
-            *close = '\0';
           g_string_append_printf (out, "%% %s\n", g_strstrip (inner));
           continue;
         }

@@ -317,6 +317,8 @@ m42_application_handle_local_options (GApplication *app, GVariantDict *options)
     {
       g_free (self->print_to);
       self->print_to = g_strdup (path);
+      g_application_set_flags (app, g_application_get_flags (app) |
+                                    G_APPLICATION_NON_UNIQUE);
     }
   if (g_variant_dict_lookup (options, "export-pdf", "^&ay", &path))
     {
@@ -345,6 +347,7 @@ m42_application_finalize (GObject *object)
 {
   g_free (M42_APPLICATION (object)->screenshot);
   g_free (M42_APPLICATION (object)->activate);
+  g_free (M42_APPLICATION (object)->convert);
   g_free (M42_APPLICATION (object)->export_pdf);
   g_free (M42_APPLICATION (object)->print_to);
   G_OBJECT_CLASS (m42_application_parent_class)->finalize (object);

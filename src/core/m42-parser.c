@@ -803,6 +803,8 @@ parse_prefix_apply (Parser *p, M42Node *head)
 
   advance (p);   /* @ */
   arg = parse_unary (p);
+  if (arg != NULL && arg->kind == M42_NODE_IDENT && p->tok.kind == M42_TOK_AT)
+    arg = parse_prefix_apply (p, arg);
   if (arg == NULL)
     {
       m42_node_free (head);
@@ -1460,6 +1462,38 @@ parse_stmt (Parser *p)
           M42Token next = m42_lexer_next (&lx);
           gboolean is_block = next.kind != M42_TOK_LBRACKET && next.kind != M42_TOK_LPAREN &&
                               next.kind != M42_TOK_ASSIGN && next.kind != M42_TOK_END;
+
+          /* if (x > 0), y = 1; end -- the condition in brackets, which
+           * is how MATLAB is usually written, looks like a call of a
+           * function named if until what follows the closing bracket
+           * is looked at: a comma, a semicolon, the end of the line or
+           * the first word of the body make it a block. */
+          if (next.kind == M42_TOK_LPAREN)
+            {
+              int depth = 1;
+
+              while (depth > 0)
+                {
+                  M42Token inside = m42_lexer_next (&lx);
+                  gboolean stop = inside.kind == M42_TOK_END || inside.kind == M42_TOK_ERROR;
+
+                  if (inside.kind == M42_TOK_LPAREN)
+                    depth++;
+                  else if (inside.kind == M42_TOK_RPAREN)
+                    depth--;
+                  m42_token_clear (&inside);
+                  if (stop)
+                    break;
+                }
+              if (depth == 0)
+                {
+                  M42Token after = m42_lexer_next (&lx);
+
+                  is_block = after.kind == M42_TOK_COMMA || after.kind == M42_TOK_SEMI ||
+                             after.kind == M42_TOK_END || after.kind == M42_TOK_IDENT;
+                  m42_token_clear (&after);
+                }
+            }
 
           m42_token_clear (&next);
           if (is_block)
