@@ -38,6 +38,7 @@ matrices inside brackets, graphs drawn.
 | **Enter** | evaluate the line |
 | **↑** and **↓** | walk back and forth through what you have typed |
 | **click a cell** | put its input back on the line, to run again with a change |
+| **right-click a figure** | save that graph, of either kind, as a PNG at twice the size it has on the page |
 | **Ctrl +**, **Ctrl −**, **Ctrl 0** | make the mathematics bigger, smaller, ordinary |
 | **F1** | the function reference, with a box that narrows the list as you type |
 | **Ctrl S**, **Ctrl O** | save and open a `.m42` file — the inputs, which are played back |

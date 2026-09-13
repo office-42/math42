@@ -210,7 +210,7 @@ way.
 
 **The window.** The up and down arrows walk back through what has been
 typed, and clicking a cell puts its input back on the line to run
-again. Ctrl + and Ctrl − make the mathematics bigger and smaller,
+again. A right click on any drawn figure offers to save it as a PNG. Ctrl + and Ctrl − make the mathematics bigger and smaller,
 Ctrl 0 puts it back. Ctrl S saves the notebook as a `.m42` file of its
 inputs, which Ctrl O plays back, Ctrl P prints, and File ▸ Export as
 PDF writes the whole page out as vector graphics — both of them the

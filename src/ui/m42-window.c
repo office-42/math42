@@ -500,6 +500,14 @@ static const GActionEntry WIN_ACTIONS[] = {
   { "about",           action_about,           NULL, NULL, NULL, { 0 } },
 };
 
+/* What the notebook has to say -- where it saved a figure -- goes on
+ * the status bar. */
+static void
+on_notebook_message (M42Notebook *notebook, const char *message, gpointer data)
+{
+  set_status (M42_WINDOW (data), "%s", message);
+}
+
 /* Clicking a cell puts what was typed there back on the input line,
  * which is the quickest way to run a line again with one thing
  * changed. */
@@ -610,6 +618,7 @@ m42_window_init (M42Window *self)
     g_signal_connect (click, "pressed", G_CALLBACK (on_notebook_clicked), self);
     gtk_widget_add_controller (self->notebook, GTK_EVENT_CONTROLLER (click));
   }
+  g_signal_connect (self->notebook, "message", G_CALLBACK (on_notebook_message), self);
   gtk_widget_set_vexpand (self->scroller, TRUE);
   gtk_box_append (GTK_BOX (box), self->scroller);
 

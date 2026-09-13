@@ -46,6 +46,17 @@ gboolean m42_notebook_print_to_file (M42Notebook *self, const char *title,
  * so that a line can be typed again. */
 const char *m42_notebook_input_at (M42Notebook *self, double x, double y);
 
+/* The cell whose result is a drawn figure at a point, or -1.  A right
+ * click on one opens a menu that saves it as a PNG; this is the same
+ * question asked from outside. */
+int m42_notebook_figure_at (M42Notebook *self, double x, double y);
+
+/* Writes the figure of a cell -- its result, drawn at twice the size
+ * it has on the page -- to a PNG.  FALSE with the error set when it
+ * could not be. */
+gboolean m42_notebook_save_figure_png (M42Notebook *self, int cell, const char *path,
+                                       GError **error);
+
 /* The inputs so far, one per line, for saving. */
 char *m42_notebook_get_inputs (M42Notebook *self);
 GStrv m42_notebook_get_outputs (M42Notebook *self);

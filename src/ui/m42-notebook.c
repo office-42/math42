@@ -16,6 +16,7 @@
 #include "m42-typeset.h"
 
 #include <cairo-pdf.h>
+#include <math.h>
 #include <pango/pangocairo.h>
 
 typedef struct {
@@ -31,7 +32,12 @@ struct _M42Notebook {
   GtkWidget  parent_instance;
   GPtrArray *cells;    /* of Cell* */
   double     scale;    /* how big the mathematics is drawn */
+  GtkWidget *menu;     /* the right-click menu over a figure, made when first wanted */
+  int        menu_cell;/* the cell it was opened over */
 };
+
+enum { SIGNAL_MESSAGE, N_SIGNALS };
+static guint signals[N_SIGNALS];
 
 G_DEFINE_FINAL_TYPE (M42Notebook, m42_notebook, GTK_TYPE_WIDGET)
 
@@ -254,11 +260,164 @@ m42_notebook_measure (GtkWidget *widget, GtkOrientation orientation, int for_siz
     }
 }
 
+/* --- saving a figure -----------------------------------------------------
+ *
+ * A right click on a cell whose result is drawn -- a graph of any
+ * kind, or a list of them -- opens a menu with one thing on it, which
+ * writes that result to a PNG at twice the size it has on the page.
+ */
+
+/* TRUE for a value with a drawn graph anywhere in it. */
+static gboolean
+value_has_figure (const M42Value *v)
+{
+  if (v == NULL)
+    return FALSE;
+  if (v->kind == M42_VALUE_PLOT)
+    return TRUE;
+  if (v->kind == M42_VALUE_LIST)
+    for (guint i = 0; i < m42_value_list_length (v); i++)
+      if (value_has_figure (m42_value_list_nth (v, i)))
+        return TRUE;
+  return FALSE;
+}
+
+int
+m42_notebook_figure_at (M42Notebook *self, double x, double y)
+{
+  int width = gtk_widget_get_width (GTK_WIDGET (self));
+  int top = MARGIN_TOP;
+
+  for (guint i = 0; i < self->cells->len; i++)
+    {
+      Cell *c = g_ptr_array_index (self->cells, i);
+      int h = layout_cell (self, c, NULL, top, width);
+
+      if (y >= top && y <= top + h)
+        return c->output != NULL && value_has_figure (c->value) ? (int) i : -1;
+      top += h + CELL_GAP;
+    }
+  return -1;
+}
+
+gboolean
+m42_notebook_save_figure_png (M42Notebook *self, int cell, const char *path, GError **error)
+{
+  Cell *c;
+  const double k = 2.0;    /* twice the size on the page: crisp when printed or pasted */
+  cairo_surface_t *surface;
+  cairo_t *cr;
+  cairo_status_t status;
+
+  if (cell < 0 || (guint) cell >= self->cells->len ||
+      (c = g_ptr_array_index (self->cells, cell))->output == NULL)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "That cell has no figure to save");
+      return FALSE;
+    }
+  surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32,
+                                        (int) ceil (m42_box_width (c->output) * k),
+                                        (int) ceil (m42_box_height (c->output) * k));
+  cr = cairo_create (surface);
+  cairo_set_source_rgb (cr, 1, 1, 1);
+  cairo_paint (cr);
+  cairo_scale (cr, k, k);
+  m42_box_draw (c->output, cr, 0, 0);
+  cairo_destroy (cr);
+  status = cairo_surface_write_to_png (surface, path);
+  cairo_surface_destroy (surface);
+  if (status != CAIRO_STATUS_SUCCESS)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s", cairo_status_to_string (status));
+      return FALSE;
+    }
+  return TRUE;
+}
+
+static void
+save_figure_done (GObject *source, GAsyncResult *result, gpointer data)
+{
+  g_autoptr (M42Notebook) self = data;
+  g_autoptr (GFile) file = gtk_file_dialog_save_finish (GTK_FILE_DIALOG (source), result, NULL);
+  g_autofree char *path = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *message = NULL;
+
+  if (file == NULL || self->cells == NULL)
+    return;
+  path = g_file_get_path (file);
+  if (path == NULL)
+    message = g_strdup ("That place cannot be written to directly");
+  else if (m42_notebook_save_figure_png (self, self->menu_cell, path, &error))
+    message = g_strdup_printf ("Saved the figure to %s", path);
+  else
+    message = g_strdup_printf ("Could not save the figure: %s", error->message);
+  g_signal_emit (self, signals[SIGNAL_MESSAGE], 0, message);
+}
+
+/* The menu's one entry: a file dialog, and the figure written where
+ * it says. */
+static void
+on_save_figure (GtkWidget *widget, const char *action_name, GVariant *param)
+{
+  M42Notebook *self = M42_NOTEBOOK (widget);
+  GtkRoot *root = gtk_widget_get_root (widget);
+  GtkFileDialog *dialog;
+  g_autofree char *name = NULL;
+
+  if (self->menu_cell < 0 || (guint) self->menu_cell >= self->cells->len)
+    return;
+  name = g_strdup_printf ("figure-%d.png",
+                          ((Cell *) g_ptr_array_index (self->cells, self->menu_cell))->n);
+  dialog = gtk_file_dialog_new ();
+  gtk_file_dialog_set_title (dialog, "Save Figure as PNG");
+  gtk_file_dialog_set_initial_name (dialog, name);
+  gtk_file_dialog_save (dialog, GTK_IS_WINDOW (root) ? GTK_WINDOW (root) : NULL, NULL,
+                        save_figure_done, g_object_ref (self));
+  g_object_unref (dialog);
+}
+
+static void
+on_right_click (GtkGestureClick *gesture, int n_press, double x, double y, gpointer data)
+{
+  M42Notebook *self = data;
+  int cell = m42_notebook_figure_at (self, x, y);
+
+  if (cell < 0)
+    return;
+  self->menu_cell = cell;
+  if (self->menu == NULL)
+    {
+      g_autoptr (GMenu) model = g_menu_new ();
+
+      g_menu_append (model, "Save Figure as PNG\342\200\246", "notebook.save-figure");
+      self->menu = gtk_popover_menu_new_from_model (G_MENU_MODEL (model));
+      gtk_widget_set_parent (self->menu, GTK_WIDGET (self));
+      gtk_popover_set_has_arrow (GTK_POPOVER (self->menu), FALSE);
+      gtk_widget_set_halign (self->menu, GTK_ALIGN_START);
+    }
+  gtk_popover_set_pointing_to (GTK_POPOVER (self->menu),
+                               &(GdkRectangle) { (int) x, (int) y, 1, 1 });
+  gtk_popover_popup (GTK_POPOVER (self->menu));
+  gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+}
+
+/* A popover parented to a plain widget is placed by that widget. */
+static void
+m42_notebook_size_allocate (GtkWidget *widget, int width, int height, int baseline)
+{
+  M42Notebook *self = M42_NOTEBOOK (widget);
+
+  if (self->menu != NULL)
+    gtk_popover_present (GTK_POPOVER (self->menu));
+}
+
 static void
 m42_notebook_dispose (GObject *object)
 {
   M42Notebook *self = M42_NOTEBOOK (object);
 
+  g_clear_pointer (&self->menu, gtk_widget_unparent);
   g_clear_pointer (&self->cells, g_ptr_array_unref);
   G_OBJECT_CLASS (m42_notebook_parent_class)->dispose (object);
 }
@@ -271,17 +430,32 @@ m42_notebook_class_init (M42NotebookClass *klass)
   G_OBJECT_CLASS (klass)->dispose = m42_notebook_dispose;
   widget_class->snapshot = m42_notebook_snapshot;
   widget_class->measure = m42_notebook_measure;
+  widget_class->size_allocate = m42_notebook_size_allocate;
   gtk_widget_class_set_css_name (widget_class, "notebook-canvas");
+  gtk_widget_class_install_action (widget_class, "notebook.save-figure", NULL, on_save_figure);
+
+  /* "message": a line for the status bar, such as where a figure was
+   * saved. */
+  signals[SIGNAL_MESSAGE] =
+    g_signal_new ("message", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+                  NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 
 static void
 m42_notebook_init (M42Notebook *self)
 {
+  GtkGesture *right = gtk_gesture_click_new ();
+
   self->cells = g_ptr_array_new_with_free_func ((GDestroyNotify) cell_free);
   self->scale = 1.0;
+  self->menu_cell = -1;
   gtk_widget_add_css_class (GTK_WIDGET (self), "m42-notebook");
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
+
+  gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (right), GDK_BUTTON_SECONDARY);
+  g_signal_connect (right, "pressed", G_CALLBACK (on_right_click), self);
+  gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (right));
 }
 
 GtkWidget *
