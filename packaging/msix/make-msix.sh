@@ -52,11 +52,16 @@ sdk=$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/10.*/x64 2>/dev/null |
 
 version=$(sed -n "s/^  version: '\(.*\)',$/\1/p" "$top/meson.build")
 [ -n "$version" ] || { echo "no version in meson.build" >&2; exit 1; }
-# A Store version is four numbers and the last of them must be zero.
-appxver=$version.0
+# A Store version is four numbers and the last of them must be zero, so
+# a version still being worked on -- 1.0.1-dev -- goes in as the release
+# it is on its way to.  The file keeps the whole name, to tell the two
+# apart on disk; a package built from such a tree is for looking at, not
+# for sending.
+appxver=$(echo "$version" | sed 's/-.*$//').0
 msix=$build/math42-$version-x64.msix
 
-echo "math42 $version from $prefix, packed by $(basename "$(dirname "$sdk")")"
+echo "math42 $version as $appxver, from $prefix," \
+     "packed by $(basename "$(dirname "$sdk")")"
 
 # ---------------------------------------------------------------- build
 
