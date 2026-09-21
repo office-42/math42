@@ -14,6 +14,8 @@ in C on GTK 4, Pango and Cairo. A sibling of
 is a file you can open: every notebook is a plain text file of its
 inputs, and running it again gives the page back.*
 
+https://apps.microsoft.com/detail/9PDC4D7RGLFX
+
 The window is a notebook: type an expression on the input line, press
 Enter, and an `In[n]:=` / `Out[n]=` pair is added to the page. Results
 are set as mathematics — an integral under its sign with its limits, a
