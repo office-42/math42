@@ -134,9 +134,9 @@ static const M42Function FUNCTIONS[] = {
   { "PrimeQ", "isprime", "PrimeQ[n]", "whether n is prime", "Numbers" },
   { "Prime", NULL, "Prime[n]", "the nth prime", "Numbers" },
   { "Fibonacci", NULL, "Fibonacci[n]", "the nth Fibonacci number, exactly however large", "Numbers" },
-  { "RandomReal", "rand", "RandomReal[]", "a number between 0 and 1, or RandomReal[{a, b}]", "Numbers" },
-  { "RandomInteger", "randi", "RandomInteger[{a, b}]", "a whole number between a and b", "Numbers" },
-  { "randn", NULL, "randn(n)", "numbers from the normal distribution", "Numbers" },
+  { "RandomReal", "rand", "RandomReal[]", "a number between 0 and 1, or RandomReal[{a, b}]; rand(m, n) is an m by n matrix of them", "Numbers" },
+  { "RandomInteger", "randi", "RandomInteger[{a, b}]", "a whole number between a and b; randi(imax, m, n) an m by n matrix of them from 1", "Numbers" },
+  { "randn", NULL, "randn(n)", "numbers from the normal distribution; randn(m, n) a matrix of them", "Numbers" },
   { "Chop", NULL, "Chop[x]", "a number too small to matter becomes zero", "Numbers" },
   { "Round", "round", "Round[x, dx]", "to the nearest multiple of dx", "Numbers" },
   { "rem", NULL, "rem(a, b)", "the remainder, keeping the sign of a", "Numbers" },
@@ -533,6 +533,7 @@ static const M42Function FUNCTIONS[] = {
   { "fmaxbnd", NULL, "fmaxbnd(f, a, b)", "where the highest point is, between two ends", "Algebra" },
   { "simplifyfraction", "Together", "simplifyfraction(e)", "over one denominator, MATLAB's spelling", "Polynomials" },
 
+  { "magic", NULL, "magic(n)", "an n by n magic square, the one MATLAB gives", "Matrices" },
   { NULL, NULL, NULL, NULL, NULL },
 
 };

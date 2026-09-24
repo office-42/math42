@@ -1178,7 +1178,9 @@ What is different:
 What is there:
 
 - `sin(x)` round-bracket calls, and the lower-case names, always numeric.
-- `[1 2; 3 4]` matrices, `A(2, :)`, `A(i, j)`, `x(end)`, `x(2:4)`.
+- `[1 2; 3 4]` matrices, `A(2, :)`, `A(i, j)`, `x(end)`, `x(2:4)`,
+  `x(end - 1)`, `x(2:end)`, `A(end, :)`, `x(end + 1) = y`, and a mask:
+  `x(x > 2)`, `A(A > 2)`.
 - `a:b`, `a:step:b`, `linspace`, `logspace`, `zeros`, `ones`, `eye`.
 - `*`, `.*`, `.^`, `'`, `\`, `.` — with `*` element-wise and `.` the
   matrix product, as Mathematica has it.
@@ -1192,7 +1194,8 @@ What is there:
   `fliplr`, `flipud`, `rot90`, `repmat`, `sortrows`, `triu`, `tril`,
   `kron`, `nnz`, `prod`, `polyval`, `polyfit`, `roots`, `conv`,
   `interp1`, `fzero`, `fminbnd`, `quad`, `ode45`, `rand`, `randi`,
-  `randn`, `hypot`, `nthroot`, `deg2rad`, `rad2deg`, `primes`,
+  `randn` (and `rand(m, n)`, `randn(m, n)`, `randi(imax, m, n)`),
+  `magic`, `hypot`, `nthroot`, `deg2rad`, `rad2deg`, `primes`,
   `strjoin`, `strtrim`, `contains`, `dec2base`, `base2dec`, `subs`,
   `squeeze`, `vertcat`, `horzcat`, `cat`, `cellfun`, `histcounts`,
   `chol`, `sqrtm`, `linsolve`, `regexprep`, `erf`, `erfc`, `erfinv`,
@@ -1210,7 +1213,7 @@ What is different:
 | indices | start at 1 as they do in MATLAB, but a list is a list, not an array with a shape |
 | `function` files | not there; write `f(x) = …` or `f = @(x) …` |
 | a space before `(` | means multiplication, as it does in Mathematica: `2 x (x + 1)` is a product. Write a call with no space — `f(3)`, `v(2)` — unless the name is one math42 knows, where `Sin (x)` is still `Sin[x]` |
-| several return values | `[q, r] = size(A)` hands out the pieces of the list `size(A)` returns, and `{q, r} = …` does the same the Mathematica way; a function still returns one thing, which is that list |
+| several return values | `[q, r] = size(A)` hands out the pieces of the list `size(A)` returns, and `{q, r} = …` does the same the Mathematica way; a function still returns one thing, which is that list. `[m, i] = max(v)`, `min` and `[s, i] = sort(v)` hand back the places too, as in MATLAB |
 | `end` in a block | needed after `for`, `while` and `if`, as usual — and a one-line block needs a comma after its header |
 | strings | in double quotes, or MATLAB's single ones wherever a quote cannot be a transpose — `disp('hello')`, `x = 'it''s'` — while `A'`, `[1 2]'` and `y''` stay what they were |
 

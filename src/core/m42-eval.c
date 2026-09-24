@@ -12634,6 +12634,88 @@ cofactor_det (const M42Value *m)
   return total;
 }
 
+/* MATLAB's magic squares, row by row into m.  Odd: the diagonal
+ * stepping of the Siamese method, as two whole-number formulas.  Four
+ * times something: 1 to n^2 in order, with the entries on the
+ * diagonals of each 4x4 block turned round to n^2 + 1 less themselves.
+ * Twice an odd number: four odd squares of half the size, a quarter of
+ * the numbers each, with a few columns of the top and bottom halves
+ * swapped over (LUX, as MATLAB does it). */
+static void
+magic_square (gint64 *m, gint64 n)
+{
+#define M(i, j) m[(i) * n + (j)]
+  if (n % 2 == 1)
+    {
+      for (gint64 i = 1; i <= n; i++)
+        for (gint64 j = 1; j <= n; j++)
+          {
+            gint64 a = ((i + j - (n + 3) / 2) % n + n) % n;
+            gint64 b = (i + 2 * j - 2) % n;
+
+            M (i - 1, j - 1) = n * a + b + 1;
+          }
+    }
+  else if (n % 4 == 0)
+    {
+      for (gint64 i = 1; i <= n; i++)
+        for (gint64 j = 1; j <= n; j++)
+          {
+            gboolean turned = ((i % 4) / 2) == ((j % 4) / 2);
+            gint64 x = (i - 1) * n + j;
+
+            M (i - 1, j - 1) = turned ? n * n + 1 - x : x;
+          }
+    }
+  else if (n > 0)
+    {
+      gint64 p = n / 2, k = (n - 2) / 4;
+      g_autofree gint64 *q = g_new0 (gint64, p * p + 1);
+
+      magic_square (q, p);
+      for (gint64 i = 0; i < p; i++)
+        for (gint64 j = 0; j < p; j++)
+          {
+            gint64 x = q[i * p + j];
+
+            M (i, j) = x;
+            M (i, j + p) = x + 2 * p * p;
+            M (i + p, j) = x + 3 * p * p;
+            M (i + p, j + p) = x + p * p;
+          }
+      if (n == 2)
+        return;
+      /* The first k columns and the last k - 1, top half for bottom. */
+      for (gint64 j = 0; j < n; j++)
+        {
+          if (!(j < k || j >= n - k + 1))
+            continue;
+          for (gint64 i = 0; i < p; i++)
+            {
+              gint64 t = M (i, j);
+
+              M (i, j) = M (i + p, j);
+              M (i + p, j) = t;
+            }
+        }
+      /* And in the middle row of the halves, the first column back and
+       * the (k+1)th over. */
+      {
+        gint64 i = k;
+        gint64 js[2] = { 0, k };
+
+        for (guint c = 0; c < 2; c++)
+          {
+            gint64 t = M (i, js[c]);
+
+            M (i, js[c]) = M (i + p, js[c]);
+            M (i + p, js[c]) = t;
+          }
+      }
+    }
+#undef M
+}
+
 static gboolean
 name_is (const char *name, const char *a, const char *b)
 {
@@ -14230,6 +14312,81 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
           }
       }
     }
+  /* MATLAB's rand(m, n), randn(m, n) and randi(imax, m, n): an m by n
+   * matrix of them.  randi takes its largest as a number or its range as
+   * [a b], and on its own gives one of them. */
+  if ((name_is (name, "rand", "randn") && args->len == 2) ||
+      (name_is (name, "randi", NULL) && (args->len == 1 || args->len == 3)))
+    {
+      gint64 rows = 1, cols = 1, low = 1, high = 1;
+      guint from = name[4] == 'i' ? 1 : 0;
+      M42Value *out;
+
+      if (name[4] == 'i')
+        {
+          M42Value *range = ARG (0);
+
+          if (m42_value_is_vector (range) && m42_value_list_length (range) == 2)
+            {
+              if (!whole_int64 (m42_value_list_nth (range, 0), &low) ||
+                  !whole_int64 (m42_value_list_nth (range, 1), &high))
+                return m42_value_error ("randi wants whole numbers for its range");
+            }
+          else if (!whole_int64 (range, &high))
+            return m42_value_error ("randi wants a whole number, or a range [a b]");
+          if (low > high || high - low >= G_MAXINT32)
+            return m42_value_error ("randi: that range is empty or too wide");
+        }
+      if (args->len > from &&
+          (!whole_int64 (ARG (from), &rows) || !whole_int64 (ARG (from + 1), &cols) ||
+           rows < 0 || cols < 0 || (double) rows * cols > 1e6))
+        return m42_value_error ("%s wants a size of whole numbers, and not too many", name);
+      if (args->len == 1)
+        return m42_value_number (low + g_random_int_range (0, (gint32) (high - low + 1)));
+
+      out = m42_value_list_new ();
+      for (gint64 i = 0; i < rows; i++)
+        {
+          M42Value *row = m42_value_list_new ();
+
+          for (gint64 j = 0; j < cols; j++)
+            if (name[4] == 'i')
+              m42_value_list_append (row, m42_value_number (low + g_random_int_range (0, (gint32) (high - low + 1))));
+            else if (name[4] == 'n')
+              m42_value_list_append (row, m42_value_real (sqrt (-2 * log (g_random_double_range (1e-12, 1))) *
+                                                          cos (2 * G_PI * g_random_double ())));
+            else
+              m42_value_list_append (row, m42_value_real (g_random_double ()));
+          m42_value_list_append (out, row);
+        }
+      return out;
+    }
+
+  /* A magic square, by MATLAB's own construction, so that magic(n) is
+   * the very matrix MATLAB gives: the rows, the columns and both
+   * diagonals add up to n (n^2 + 1)/2. */
+  if (name_is (name, "magic", NULL) && args->len == 1)
+    {
+      gint64 n;
+      g_autofree gint64 *m = NULL;
+      M42Value *out;
+
+      if (!whole_int64 (ARG (0), &n) || n < 0 || n > 1000)
+        return m42_value_error ("magic wants a whole number, up to a thousand");
+      m = g_new0 (gint64, n * n + 1);
+      magic_square (m, n);
+      out = m42_value_list_new ();
+      for (gint64 i = 0; i < n; i++)
+        {
+          M42Value *row = m42_value_list_new ();
+
+          for (gint64 j = 0; j < n; j++)
+            m42_value_list_append (row, m42_value_exact_int (m[i * n + j]));
+          m42_value_list_append (out, row);
+        }
+      return out;
+    }
+
   if (name_is (name, "RandomReal", "rand") && args->len <= 1)
     {
       if (args->len == 0)
@@ -17965,6 +18122,74 @@ assign_part (M42Session *s, const char *name, const M42Node *lhs, guint first,
   return matlab ? m42_value_ref (fresh) : m42_value_ref (what);
 }
 
+/* [m, i] = max(v): MATLAB hands back where the largest is as well as
+ * what it is when two names are waiting, and [s, i] = sort(v) the
+ * order it put them in.  The pair, or NULL when the right side is not
+ * one of those on a list of numbers and is to be worked out as usual. */
+static M42Value *
+with_place (M42Session *s, const M42Node *right)
+{
+  g_autoptr (M42Value) v = NULL;
+  gboolean largest, sorting;
+  guint n;
+  M42Value *out;
+
+  if (right->kind != M42_NODE_CALL || right->children->len != 1)
+    return NULL;
+  largest = strcmp (right->name, "max") == 0;
+  sorting = strcmp (right->name, "sort") == 0;
+  if (!largest && !sorting && strcmp (right->name, "min") != 0)
+    return NULL;
+  v = eval (s, m42_node_child (right, 0));
+  if (!m42_value_is_vector (v))
+    return NULL;
+  n = m42_value_list_length (v);
+  out = m42_value_list_new ();
+  if (sorting)
+    {
+      /* Ascending, and the first of equals first, as MATLAB sorts. */
+      g_autofree guint *order = g_new (guint, n);
+      M42Value *sorted = m42_value_list_new ();
+      M42Value *places = m42_value_list_new ();
+
+      for (guint i = 0; i < n; i++)
+        order[i] = i;
+      for (guint i = 1; i < n; i++)
+        for (guint j = i; j > 0 &&
+             m42_value_list_nth (v, order[j - 1])->u.number >
+               m42_value_list_nth (v, order[j])->u.number; j--)
+          {
+            guint t = order[j];
+
+            order[j] = order[j - 1];
+            order[j - 1] = t;
+          }
+      for (guint i = 0; i < n; i++)
+        {
+          m42_value_list_append (sorted, m42_value_ref (m42_value_list_nth (v, order[i])));
+          m42_value_list_append (places, m42_value_number (order[i] + 1));
+        }
+      m42_value_list_append (out, sorted);
+      m42_value_list_append (out, places);
+      return out;
+    }
+  {
+    guint best = 0;
+
+    for (guint i = 1; i < n; i++)
+      {
+        double x = m42_value_list_nth (v, i)->u.number;
+        double b = m42_value_list_nth (v, best)->u.number;
+
+        if (isnan (b) || (largest ? x > b : x < b))
+          best = i;
+      }
+    m42_value_list_append (out, m42_value_ref (m42_value_list_nth (v, best)));
+    m42_value_list_append (out, m42_value_number (best + 1));
+  }
+  return out;
+}
+
 /* Keeps a definition under the name it is for, in the order it was
  * given, with one of the same shape replaced rather than added. */
 static M42Value *
@@ -17981,8 +18206,12 @@ define_rule (M42Session *s, const M42Node *n)
       (lhs->kind == M42_NODE_MATRIX && lhs->children->len == 1))
     {
       const M42Node *names = lhs->kind == M42_NODE_LIST ? lhs : m42_node_child (lhs, 0);
-      g_autoptr (M42Value) pieces = eval (s, m42_node_child (n, 1));
+      g_autoptr (M42Value) pieces = NULL;
 
+      if (names->children->len == 2)
+        pieces = with_place (s, m42_node_child (n, 1));
+      if (pieces == NULL)
+        pieces = eval (s, m42_node_child (n, 1));
       if (is_error (pieces))
         return g_steal_pointer (&pieces);
       if (pieces->kind != M42_VALUE_LIST)
