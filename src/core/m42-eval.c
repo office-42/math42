@@ -3493,55 +3493,490 @@ coefficient_node (double c)
   return m42_node_number (c);
 }
 
-/* Limit[f, x -> a]: the value f closes in on, found by walking in from
- * both sides.  A one-sided limit is what comes back when the two sides
- * disagree only in sign of infinity. */
-/* A number that is one of the constants everyone would rather see
- * written out: 2.7182818 is E, not itself.  Only used where an answer
- * was worked out numerically and would otherwise be printed as a row
- * of digits -- a limit, for one.
+/* --- limits ---------------------------------------------------------------
  *
- * The tolerance is a part in ten million, which is about as close as
- * sampling a function out towards infinity can get before the doubles
- * themselves start to wobble.  No two constants in the list are within
- * a hundred thousand times that of each other, so a match this close
- * is the constant and not a coincidence. */
-static M42Node *
-nice_constant (double x)
+ * Limit[f, x -> a] is worked out the way it is by hand, and only then,
+ * if that finds nothing, by walking in on a numerically.  Every
+ * answer found by hand is checked against the function near a before
+ * it is given, so that a slip in the rules -- 0^0 comes out as 1 here,
+ * for one -- cannot get out; and a number found by walking in is given
+ * as the number it is.  It used to be rounded to a whole number or a
+ * fraction within a millionth, and matched against a list of constants,
+ * which is how Sqrt[x^2 + x] - x out at infinity came to be
+ * 0.500000005587935 and Sin[3 x]/Sin[5 x] at nothing 0.5999992.
+ */
+
+#define LIMIT_DEPTH 10
+
+/* The kth point in from a, on the given side: a + h with h a tenth to
+ * the kth, or out towards an infinite a, ten to the kth. */
+static double
+limit_near (double a, int side, int k)
 {
-  static const struct { const char *how; double value; } KNOWN[] = {
-    { "E",           2.718281828459045 },
-    { "Pi",          3.141592653589793 },
-    { "Pi/2",        1.570796326794897 },
-    { "Pi/3",        1.047197551196598 },
-    { "Pi/4",        0.785398163397448 },
-    { "Pi/6",        0.523598775598299 },
-    { "2 Pi",        6.283185307179586 },
-    { "Sqrt[2]",     1.414213562373095 },
-    { "Sqrt[3]",     1.732050807568877 },
-    { "Log[2]",      0.693147180559945 },
-    { "Pi^2/6",      1.644934066848226 },
-    { "GoldenRatio", 1.618033988749895 },
-  };
+  if (isinf (a))
+    return copysign (pow (10, k), a);
+  return a + side * pow (10, -k) * MAX (1.0, fabs (a));
+}
 
-  for (guint i = 0; i < G_N_ELEMENTS (KNOWN); i++)
-    for (int sign = 1; sign >= -1; sign -= 2)
-      {
-        double want = sign * KNOWN[i].value;
+/* Whether f near a says the same as L: a finite L within a thousandth
+ * of f at one of the points in from a, and closer there than at the
+ * first; an infinite one with f growing that way. */
+static gboolean
+limit_agrees (M42Session *s, const M42Node *f, const char *var, double a, int side,
+              const M42Value *L)
+{
+  double target, first, best = INFINITY;
+  int last = isinf (a) ? 8 : 6;
 
-        if (fabs (x - want) < 1e-7 * fabs (want))
-          {
-            g_autofree char *complaint = NULL;
-            M42Node *tree = m42_parse (KNOWN[i].how, &complaint);
+  if (!value_number (L, &target))
+    return L->kind == M42_VALUE_EXPR;          /* a parameter: nothing to check against */
+  first = number_at (s, f, var, limit_near (a, side, 2));
+  if (isinf (target))
+    {
+      double before = first;
 
-            if (tree == NULL)
-              return NULL;
-            return sign > 0 ? tree : m42_node_unary (M42_TOK_MINUS, tree);
-          }
-      }
+      if (isnan (first) || (first > 0) != (target > 0))
+        return FALSE;
+      for (int k = 3; k <= last; k++)
+        {
+          double here = number_at (s, f, var, limit_near (a, side, k));
+
+          /* Past what a double holds, 2^n at a million has nothing to
+           * give; infinity already reached is enough. */
+          if (isnan (here) && isinf (before))
+            break;
+          if (isnan (here) || (here > 0) != (target > 0) || fabs (here) < fabs (before))
+            return FALSE;
+          before = here;
+        }
+      return fabs (before) > 1.5 * fabs (first);
+    }
+  if (!isfinite (target) || !isfinite (first))
+    return FALSE;
+  for (int k = 3; k <= last; k++)
+    {
+      double here = number_at (s, f, var, limit_near (a, side, k));
+
+      if (isfinite (here))
+        best = MIN (best, fabs (here - target));
+    }
+  return best <= 1e-3 * MAX (1.0, fabs (target)) &&
+         (best < fabs (first - target) || best <= 1e-12 * MAX (1.0, fabs (target)));
+}
+
+/* A limit worth keeping: a number, an infinity, or an expression in
+ * other letters -- not Indeterminate, and not a complex number, which a
+ * real limit is not.  Takes v. */
+static M42Value *
+limit_value (M42Value *v)
+{
+  double x;
+
+  if (v == NULL)
+    return NULL;
+  if ((value_number (v, &x) && !isnan (x)) ||
+      (v->kind == M42_VALUE_EXPR && !value_number (v, &x) && !has_decimal (v->u.expr) &&
+       has_free_symbol (v->u.expr)))
+    return v;
+  m42_value_unref (v);
   return NULL;
 }
 
+static gboolean
+limit_infinite (const M42Value *v)
+{
+  return v != NULL && v->kind == M42_VALUE_NUMBER && isinf (v->u.number);
+}
+
+static gboolean
+limit_zero (const M42Value *v)
+{
+  double x;
+
+  return v != NULL && value_number (v, &x) && x == 0;
+}
+
+/* The sign f has near a, on that side: 1, -1, or 0 when it has none. */
+static int
+limit_sign (M42Session *s, const M42Node *f, const char *var, double a, int side)
+{
+  double x = number_at (s, f, var, limit_near (a, side, 5));
+
+  return isnan (x) || x == 0 ? 0 : (x > 0 ? 1 : -1);
+}
+
+/* Plus or minus infinity, as f's sign near a says, if it has one. */
+static M42Value *
+limit_infinity (M42Session *s, const M42Node *f, const char *var, double a, int side)
+{
+  int sign = limit_sign (s, f, var, a, side);
+
+  return sign == 0 ? NULL : m42_value_real (sign * INFINITY);
+}
+
+/* TRUE when a tree holds a function with a jump in it, where putting
+ * the point in is no way to find the limit: Floor[x] at 1. */
+static gboolean
+has_jump (const M42Node *n)
+{
+  static const char *const JUMPS[] = {
+    "Floor", "floor", "Ceiling", "ceil", "Round", "round", "IntegerPart", "fix",
+    "FractionalPart", "Sign", "sign", "UnitStep", "heaviside", "HeavisideTheta",
+    "Mod", "mod", "rem", "Quotient", "idivide", "Boole", "Piecewise",
+  };
+
+  if (n->kind == M42_NODE_CALL)
+    for (guint i = 0; i < G_N_ELEMENTS (JUMPS); i++)
+      if (strcmp (n->name, JUMPS[i]) == 0)
+        return TRUE;
+  if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_PERCENT)
+    return TRUE;
+  for (guint i = 0; i < n->children->len; i++)
+    if (has_jump (m42_node_child (n, i)))
+      return TRUE;
+  return FALSE;
+}
+
+static M42Value *limit_of (M42Session *s, const M42Node *f, const char *var, double a,
+                           const M42Node *point, int side, int depth);
+
+/* The limit of a tree built here, tidied first. */
+static M42Value *
+limit_of_new (M42Session *s, M42Node *f, const char *var, double a,
+              const M42Node *point, int side, int depth)   /* takes f */
+{
+  g_autoptr (M42Node) raw = f;
+  g_autoptr (M42Node) tidy = simplify_hard (s, raw);
+
+  return tidy != NULL ? limit_of (s, tidy, var, a, point, side, depth) : NULL;
+}
+
+/* A quotient with both halves going to nothing, or both to infinity:
+ * L'Hopital's rule, the derivatives taken with D. */
+static M42Value *
+limit_hopital (M42Session *s, const M42Node *top, const M42Node *bottom, const char *var,
+               double a, const M42Node *point, int side, int depth)
+{
+  M42Node *dt = m42_node_differentiate (top, var);
+  M42Node *db = m42_node_differentiate (bottom, var);
+
+  if (dt == NULL || db == NULL)
+    {
+      m42_node_free (dt);
+      m42_node_free (db);
+      return NULL;
+    }
+  return limit_of_new (s, m42_node_binary (M42_TOK_SLASH, dt, db), var, a, point, side,
+                       depth + 1);
+}
+
+/* TRUE for a square root, however it is written. */
+static gboolean
+is_root (const M42Node *n)
+{
+  double e;
+
+  if (n->kind == M42_NODE_UNARY && n->op == M42_TOK_MINUS)
+    return is_root (m42_node_child (n, 0));
+  if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_STAR)
+    return is_root (m42_node_child (n, 0)) || is_root (m42_node_child (n, 1));
+  return (n->kind == M42_NODE_CALL && n->children->len == 1 &&
+          (strcmp (n->name, "Sqrt") == 0 || strcmp (n->name, "sqrt") == 0)) ||
+         (n->kind == M42_NODE_BINARY && n->op == M42_TOK_CARET &&
+          constant_fold (m42_node_child (n, 1), &e) && e == 0.5);
+}
+
+/* The limit of f as var goes to a from the given side, found by the
+ * rules a course teaches: put the point in where f is continuous there;
+ * the limit of a sum, a product, a quotient, a power or a function of
+ * something from the limits of its parts; L'Hopital's rule for 0/0 and
+ * Infinity/Infinity; a product 0 Infinity turned into a quotient; a
+ * difference of infinities with a square root in it multiplied by its
+ * conjugate, and anything else of that shape put over one denominator;
+ * a power with the variable in its exponent through Exp and Log; and
+ * the series about the point, which takes the removable singularity out
+ * of Sin[x]/x.  NULL when none of it finds anything. */
+static M42Value *
+limit_of (M42Session *s, const M42Node *f, const char *var, double a,
+          const M42Node *point, int side, int depth)
+{
+  M42Value *found = NULL;
+
+  if (depth > LIMIT_DEPTH)
+    return NULL;
+  if (!m42_node_depends_on (f, var))
+    return limit_value (eval (s, f));
+
+  /* Put in the point, where nothing jumps: checked against f near it,
+   * since 0^0 and the like come out as numbers here. */
+  if (isfinite (a) && !has_jump (f))
+    {
+      g_autoptr (M42Node) in = m42_node_substitute (f, var, point);
+      M42Value *v = in != NULL ? limit_value (eval (s, in)) : NULL;
+
+      if (v != NULL && !limit_infinite (v) && limit_agrees (s, f, var, a, side, v))
+        return v;
+      g_clear_pointer (&v, m42_value_unref);
+    }
+
+  if (f->kind == M42_NODE_IDENT && strcmp (f->name, var) == 0)
+    return isinf (a) ? m42_value_real (a) : NULL;
+
+  if (f->kind == M42_NODE_UNARY && f->op == M42_TOK_MINUS)
+    {
+      g_autoptr (M42Value) inner = limit_of (s, m42_node_child (f, 0), var, a, point, side, depth + 1);
+
+      if (inner != NULL)
+        return negate (inner);
+    }
+
+  if (f->kind == M42_NODE_BINARY)
+    {
+      const M42Node *A = m42_node_child (f, 0), *B = m42_node_child (f, 1);
+      g_autoptr (M42Value) la = NULL;
+      g_autoptr (M42Value) lb = NULL;
+
+      switch (f->op)
+        {
+        case M42_TOK_PLUS:
+        case M42_TOK_MINUS:
+          la = limit_of (s, A, var, a, point, side, depth + 1);
+          lb = limit_of (s, B, var, a, point, side, depth + 1);
+          if (la != NULL && lb != NULL)
+            {
+              double x, y;
+
+              value_number (la, &x);
+              value_number (lb, &y);
+              if (f->op == M42_TOK_MINUS)
+                y = -y;
+              if (!(isinf (x) && isinf (y) && (x > 0) != (y > 0)))
+                return limit_value (map2 (f->op, la, lb));
+            }
+          if ((limit_infinite (la) || la == NULL) && (limit_infinite (lb) || lb == NULL))
+            {
+              /* A polynomial out at infinity goes where its leading term
+               * does: 5 x^2 - x. */
+              {
+                g_autoptr (GArray) coeffs = g_array_new (FALSE, TRUE, sizeof (double));
+
+                if (isinf (a) && poly_coeffs (f, var, coeffs, 0) && coeffs->len >= 2)
+                  return limit_infinity (s, f, var, a, side);
+              }
+              /* Infinity - Infinity.  With a square root in it, times its
+               * conjugate over its conjugate: Sqrt[x^2 + x] - x is
+               * x/(Sqrt[x^2 + x] + x). */
+              if (is_root (A) || is_root (B))
+                {
+                  M42Node *top = m42_node_binary (M42_TOK_MINUS,
+                                                  m42_node_binary (M42_TOK_CARET, m42_node_copy (A),
+                                                                   m42_node_number (2)),
+                                                  m42_node_binary (M42_TOK_CARET, m42_node_copy (B),
+                                                                   m42_node_number (2)));
+                  M42Node *bottom = m42_node_binary (f->op == M42_TOK_MINUS ? M42_TOK_PLUS
+                                                                            : M42_TOK_MINUS,
+                                                     m42_node_copy (A), m42_node_copy (B));
+
+                  found = limit_of_new (s, m42_node_binary (M42_TOK_SLASH, top, bottom),
+                                        var, a, point, side, depth + 1);
+                  if (found != NULL)
+                    return found;
+                }
+              /* Otherwise over one denominator, which makes a quotient
+               * of it: 1/x - 1/Sin[x]. */
+              {
+                M42Node *one = m42_node_together (f);
+
+                if (one != NULL && one->kind == M42_NODE_BINARY && one->op == M42_TOK_SLASH)
+                  return limit_of_new (s, one, var, a, point, side, depth + 1);
+                m42_node_free (one);
+              }
+            }
+          break;
+
+        case M42_TOK_STAR:
+          la = limit_of (s, A, var, a, point, side, depth + 1);
+          lb = limit_of (s, B, var, a, point, side, depth + 1);
+          /* Nothing times something that stays between -1 and 1. */
+          if ((limit_zero (la) && lb == NULL && B->kind == M42_NODE_CALL &&
+               (strcmp (B->name, "Sin") == 0 || strcmp (B->name, "Cos") == 0)) ||
+              (limit_zero (lb) && la == NULL && A->kind == M42_NODE_CALL &&
+               (strcmp (A->name, "Sin") == 0 || strcmp (A->name, "Cos") == 0)))
+            return m42_value_number (0);
+          if (la == NULL || lb == NULL)
+            break;
+          if ((limit_zero (la) && limit_infinite (lb)) || (limit_infinite (la) && limit_zero (lb)))
+            {
+              /* Nothing times infinity, as a quotient: x Log[x] is
+               * Log[x]/(1/x). */
+              const M42Node *big = limit_infinite (la) ? A : B;
+              const M42Node *small = limit_infinite (la) ? B : A;
+              /* Not tidied: tidying turns it straight back into the
+               * product it came from. */
+              g_autoptr (M42Node) quotient =
+                m42_node_binary (M42_TOK_SLASH, m42_node_copy (big),
+                                 m42_node_binary (M42_TOK_SLASH, m42_node_number (1),
+                                                  m42_node_copy (small)));
+
+              return limit_of (s, quotient, var, a, point, side, depth + 1);
+            }
+          if (limit_infinite (la) || limit_infinite (lb))
+            return limit_infinity (s, f, var, a, side);
+          return limit_value (map2 (M42_TOK_STAR, la, lb));
+
+        case M42_TOK_SLASH:
+          la = limit_of (s, A, var, a, point, side, depth + 1);
+          lb = limit_of (s, B, var, a, point, side, depth + 1);
+          if (la != NULL && lb != NULL)
+            {
+              gboolean zero_a = limit_zero (la), zero_b = limit_zero (lb);
+              gboolean inf_a = limit_infinite (la), inf_b = limit_infinite (lb);
+
+              if ((zero_a && zero_b) || (inf_a && inf_b))
+                {
+                  found = limit_hopital (s, A, B, var, a, point, side, depth);
+                  if (found != NULL)
+                    return found;
+                  break;
+                }
+              if (zero_b || inf_a)
+                return limit_infinity (s, f, var, a, side);
+              if (inf_b)
+                return m42_value_number (0);
+              return limit_value (map2 (M42_TOK_SLASH, la, lb));
+            }
+          break;
+
+        case M42_TOK_CARET:
+          if (!m42_node_depends_on (B, var))
+            {
+              double e, base;
+
+              la = limit_of (s, A, var, a, point, side, depth + 1);
+              if (la == NULL || !constant_fold (B, &e) || !value_number (la, &base))
+                break;
+              if (base == 0 && e < 0)
+                return limit_infinity (s, f, var, a, side);
+              if (isinf (base))
+                return e > 0 ? limit_infinity (s, f, var, a, side)
+                             : (e < 0 ? m42_value_number (0) : m42_value_number (1));
+              if (base < 0 && e != floor (e))
+                break;
+              lb = eval (s, B);
+              return limit_value (map2 (M42_TOK_CARET, la, lb));
+            }
+          /* The variable in the exponent: u^v is Exp[v Log[u]] -- not
+           * tidied, which would take the logarithm apart into terms
+           * the rules then cannot put together again. */
+          {
+            g_autoptr (M42Node) product =
+              m42_node_binary (M42_TOK_STAR, m42_node_copy (B),
+                               m42_node_call1 ("Log", m42_node_copy (A)));
+            g_autoptr (M42Value) inner = limit_of (s, product, var, a, point, side, depth + 1);
+
+            if (inner != NULL)
+              {
+                double x;
+
+                if (value_number (inner, &x) && isinf (x))
+                  return x > 0 ? m42_value_real (INFINITY) : m42_value_number (0);
+                {
+                  /* E to that power, written so, since Exp[1] is worked
+                   * out as a decimal and the limit of (1 + 1/n)^n is E. */
+                  g_autoptr (M42Node) raised =
+                    m42_node_binary (M42_TOK_CARET, m42_node_ident ("E"), value_to_node (inner));
+
+                  return limit_value (eval (s, raised));
+                }
+              }
+          }
+          break;
+
+        default:
+          break;
+        }
+    }
+
+  /* A function of something: of the limit of that something, where the
+   * function is continuous there -- Log at nothing, from above, going
+   * to minus infinity, and Exp at minus infinity to nothing. */
+  if (f->kind == M42_NODE_CALL && f->children->len == 1 && !has_jump (f))
+    {
+      g_autoptr (M42Value) inner = limit_of (s, m42_node_child (f, 0), var, a, point, side, depth + 1);
+
+      if (inner != NULL)
+        {
+          double x;
+
+          if ((strcmp (f->name, "Log") == 0 || strcmp (f->name, "log") == 0) &&
+              limit_zero (inner))
+            return limit_sign (s, m42_node_child (f, 0), var, a, side) > 0
+                   ? m42_value_real (-INFINITY) : NULL;
+          if (value_number (inner, &x))
+            {
+              g_autoptr (M42Node) at = m42_node_call1 (f->name, value_to_node (inner));
+
+              found = limit_value (eval (s, at));
+              if (found != NULL)
+                return found;
+            }
+        }
+    }
+
+  /* The series about the point, which the removable singularities come
+   * out of: Sin[x]/x is 1 - x^2/6 + ..., and its limit the first term.
+   * Out at infinity, about nothing in 1/x. */
+  {
+    g_autoptr (M42Node) g = NULL;
+    const char *about = var;
+    g_autoptr (M42Node) call = NULL;
+    g_autoptr (M42Value) series_value = NULL;
+
+    if (isinf (a))
+      {
+        g_autoptr (M42Node) inverse =
+          m42_node_binary (M42_TOK_SLASH, m42_node_number (a > 0 ? 1 : -1), m42_node_ident ("$t"));
+        g_autoptr (M42Node) in = m42_node_substitute (f, var, inverse);
+
+        g = in != NULL ? simplify_hard (s, in) : NULL;
+        about = "$t";
+      }
+    else
+      g = m42_node_copy (f);
+    if (g != NULL && !has_jump (g))
+      {
+        M42Node *spec = m42_node_new (M42_NODE_LIST);
+
+        g_ptr_array_add (spec->children, m42_node_ident (about));
+        g_ptr_array_add (spec->children, isinf (a) ? m42_node_number (0) : m42_node_copy (point));
+        g_ptr_array_add (spec->children, m42_node_number (1));
+        call = m42_node_new (M42_NODE_CALL);
+        call->name = g_strdup ("Series");
+        g_ptr_array_add (call->children, g_steal_pointer (&g));
+        g_ptr_array_add (call->children, spec);
+        series_value = eval (s, call);
+        if (!is_error (series_value))
+          {
+            g_autoptr (M42Node) tree = value_to_node (series_value);
+            g_autoptr (M42Node) zero = m42_node_number (0);
+            g_autoptr (M42Node) at = tree != NULL
+              ? m42_node_substitute (tree, about, isinf (a) ? zero : point) : NULL;
+
+            if (at != NULL)
+              {
+                found = limit_value (eval (s, at));
+                if (found != NULL && !limit_infinite (found))
+                  return found;
+                g_clear_pointer (&found, m42_value_unref);
+              }
+          }
+      }
+  }
+  return NULL;
+}
+
+/* Limit[f, x -> a]: from both sides of a finite a, and the two compared;
+ * from below an infinite one. */
 static M42Value *
 limit (M42Session *s, const M42Node *call)
 {
@@ -3550,6 +3985,9 @@ limit (M42Session *s, const M42Node *call)
   double a;
   double left = NAN, right = NAN;
   M42Value *err;
+  g_autoptr (M42Value) va = NULL;
+  g_autoptr (M42Node) f = NULL;
+  g_autoptr (M42Node) point = NULL;
 
   if (call->children->len != 2)
     return m42_value_error ("Limit expects an expression and a rule like x -> 0");
@@ -3557,12 +3995,73 @@ limit (M42Session *s, const M42Node *call)
   if (rule->kind != M42_NODE_RULE || m42_node_child (rule, 0)->kind != M42_NODE_IDENT)
     return m42_value_error ("Limit expects a rule like x -> 0");
   var = m42_node_child (rule, 0)->name;
+  va = eval (s, m42_node_child (rule, 1));
+  if (!need_number (va, "Limit", &a, &err))
+    return err;
+  f = symbolic_argument (s, m42_node_child (call, 0), var);
+  point = value_to_node (va);
+
+  /* By the rules first, each answer checked against f near a. */
   {
-    g_autoptr (M42Value) va = eval (s, m42_node_child (rule, 1));
-    if (!need_number (va, "Limit", &a, &err))
-      return err;
+    g_autoptr (M42Value) from_right = NULL;
+    g_autoptr (M42Value) from_left = NULL;
+    gboolean has_right, has_left;
+
+    if (isinf (a))
+      {
+        M42Value *found = limit_of (s, f, var, a, point, 1, 0);
+
+        if (found != NULL && limit_agrees (s, f, var, a, 1, found))
+          return found;
+        g_clear_pointer (&found, m42_value_unref);
+      }
+    else
+      {
+        /* A side where f has no value -- Log[x] or Sqrt[x] below
+         * nothing -- is left out, and the limit is the other's. */
+        has_right = !isnan (number_at (s, f, var, limit_near (a, 1, 4)));
+        has_left = !isnan (number_at (s, f, var, limit_near (a, -1, 4)));
+        if (has_right)
+          {
+            from_right = limit_of (s, f, var, a, point, 1, 0);
+            if (from_right != NULL && !limit_agrees (s, f, var, a, 1, from_right))
+              g_clear_pointer (&from_right, m42_value_unref);
+          }
+        if (has_left)
+          {
+            from_left = limit_of (s, f, var, a, point, -1, 0);
+            if (from_left != NULL && !limit_agrees (s, f, var, a, -1, from_left))
+              g_clear_pointer (&from_left, m42_value_unref);
+          }
+        if ((from_right != NULL || !has_right) && (from_left != NULL || !has_left) &&
+            (has_right || has_left))
+          {
+            double r = NAN, l = NAN;
+            gboolean same;
+
+            if (from_right == NULL)
+              return g_steal_pointer (&from_left);
+            if (from_left == NULL)
+              return g_steal_pointer (&from_right);
+            if (!value_number (from_right, &r) || !value_number (from_left, &l))
+              return g_steal_pointer (&from_right);   /* a parameter in it */
+            same = r == l || (isfinite (r) && fabs (r - l) <= 1e-12 * MAX (1.0, fabs (r)));
+            if (same)
+              return g_steal_pointer (&from_right);
+            {
+              g_autofree char *lt = m42_value_to_string (from_left);
+              g_autofree char *rt = m42_value_to_string (from_right);
+
+              return m42_value_error ("Limit: the two sides do not agree (%s from the left, "
+                                      "%s from the right)", lt, rt);
+            }
+          }
+      }
   }
 
+  /* Numerically, when the rules find nothing: the answer is the number
+   * the sampling closes in on, as a decimal, or the limit left as it was
+   * written when it does not close in at all. */
   if (isinf (a))
     {
       /* Off to infinity: sample further and further out, and at each
@@ -3574,95 +4073,65 @@ limit (M42Session *s, const M42Node *call)
 
       for (double t = 1e2; t <= 1e7; t *= 10)
         {
-          double near = number_at (s, m42_node_child (call, 0), var, a > 0 ? t : -t);
-          double far = number_at (s, m42_node_child (call, 0), var, a > 0 ? 2 * t : -2 * t);
+          double near = number_at (s, f, var, a > 0 ? t : -t);
+          double far = number_at (s, f, var, a > 0 ? 2 * t : -2 * t);
           double x;
 
-          if (isnan (near) || isnan (far))
-            {
-              M42Node *unevaluated = m42_node_new (M42_NODE_CALL);
-
-              unevaluated->name = g_strdup ("Limit");
-              g_ptr_array_add (unevaluated->children,
-                               symbolic_argument (s, m42_node_child (call, 0), var));
-              g_ptr_array_add (unevaluated->children, m42_node_copy (rule));
-              return m42_value_expr (unevaluated);
-            }
           if (!isfinite (near) || !isfinite (far))
-            return m42_value_number (far);
+            break;
           x = 2 * far - near;
-          /* A value walking down to nothing has its limit at nothing. */
-          if (fabs (x) < 1e-8)
-            return m42_value_number (0);
           if (isfinite (prev) && fabs (x - prev) < 1e-10 * MAX (1.0, fabs (x)))
-            {
-              M42Node *known = nice_constant (x);
-
-              if (known != NULL)
-                return expr_result (known);
-              return m42_value_number (fabs (x - round (x)) < 1e-9 ? round (x) : x);
-            }
+            return m42_value_real (x);
+          /* Out at ten million the samples are as far as they go; if the
+           * last two estimates agree to a millionth, the last is the
+           * answer, as the decimal it is. */
+          if (t >= 1e7 && isfinite (prev) && fabs (x - prev) < 1e-6 * MAX (1.0, fabs (x)))
+            return m42_value_real (x);
           prev = x;
         }
-      {
-        M42Node *known = nice_constant (prev);
-
-        if (known != NULL)
-          return expr_result (known);
-      }
-      return m42_value_number (fabs (prev - round (prev)) < 1e-6 ? round (prev) : prev);
     }
-
-  /* Two steps, the second half the size, pulled together: the error of
-   * a one-sided sample falls off with the step, and going any finer
-   * than this only lets the subtraction eat the digits. */
-  {
-    const M42Node *f = m42_node_child (call, 0);
-    double coarse_right = number_at (s, f, var, a + 1e-3);
-    double fine_right = number_at (s, f, var, a + 5e-4);
-    double coarse_left = number_at (s, f, var, a - 1e-3);
-    double fine_left = number_at (s, f, var, a - 5e-4);
-
-    right = 2 * fine_right - coarse_right;
-    left = 2 * fine_left - coarse_left;
-    if (!isfinite (right))
-      right = fine_right;
-    if (!isfinite (left))
-      left = fine_left;
-  }
-
-  /* Nothing to sample -- the expression is symbolic -- so the limit is
-   * kept as it was written, for the page to set under the word lim. */
-  if (isnan (left) && isnan (right))
+  else
     {
-      M42Node *unevaluated = m42_node_new (M42_NODE_CALL);
+      /* Two steps, the second half the size, pulled together: the error
+       * of a one-sided sample falls off with the step, and going any
+       * finer than this only lets the subtraction eat the digits. */
+      double coarse_right = number_at (s, f, var, a + 1e-3);
+      double fine_right = number_at (s, f, var, a + 5e-4);
+      double coarse_left = number_at (s, f, var, a - 1e-3);
+      double fine_left = number_at (s, f, var, a - 5e-4);
+      double finer_right = number_at (s, f, var, a + 2.5e-4);
+      double finer_left = number_at (s, f, var, a - 2.5e-4);
 
-      unevaluated->name = g_strdup ("Limit");
-      g_ptr_array_add (unevaluated->children,
-                       symbolic_argument (s, m42_node_child (call, 0), var));
-      g_ptr_array_add (unevaluated->children, m42_node_copy (rule));
-      return m42_value_expr (unevaluated);
+      right = 2 * fine_right - coarse_right;
+      left = 2 * fine_left - coarse_left;
+      /* Settled if the next halving says the same; a function that
+       * swings about near a -- Sin[1/x] -- does not. */
+      if (isfinite (right) && fabs ((2 * finer_right - fine_right) - right) > 1e-6 * MAX (1.0, fabs (right)))
+        right = NAN;
+      if (isfinite (left) && fabs ((2 * finer_left - fine_left) - left) > 1e-6 * MAX (1.0, fabs (left)))
+        left = NAN;
+      if (isfinite (left) && isfinite (right))
+        {
+          if (fabs (left - right) > 1e-4 * MAX (1.0, fabs (left) + fabs (right)))
+            return m42_value_error ("Limit: the two sides do not agree (%g from the left, "
+                                    "%g from the right)", left, right);
+          return m42_value_real ((left + right) / 2);
+        }
+      if (isfinite (right) && isnan (fine_left))
+        return m42_value_real (right);
+      if (isfinite (left) && isnan (fine_right))
+        return m42_value_real (left);
     }
-  if (!isfinite (left) || !isfinite (right))
-    return m42_value_number (left == right ? left : NAN);
-  if (fabs (left - right) > 1e-4 * MAX (1.0, fabs (left) + fabs (right)))
-    return m42_value_error ("Limit: the two sides do not agree (%g from the left, %g from the right)",
-                            left, right);
+
+  /* Nothing settled: the limit is kept as it was written, for the page
+   * to set under the word lim. */
   {
-    double x = (left + right) / 2;
+    M42Node *unevaluated = m42_node_new (M42_NODE_CALL);
 
-    /* A limit that lands on a round number, or a simple fraction,
-     * should say so rather than show the last digits of the sampling. */
-    if (fabs (x - round (x)) < 1e-6 * MAX (1.0, fabs (x)))
-      return m42_value_number (round (x));
-    for (int den = 2; den <= 24; den++)
-      {
-        double scaled = x * den;
-
-        if (fabs (scaled - round (scaled)) < 1e-6)
-          return m42_value_rational ((gint64) round (scaled), den);
-      }
-    return m42_value_number (x);
+    unevaluated->name = g_strdup ("Limit");
+    g_ptr_array_add (unevaluated->children, m42_node_copy (f));
+    g_ptr_array_add (unevaluated->children, m42_node_copy (rule));
+    return m42_value_expr (unevaluated);
   }
 }
 
