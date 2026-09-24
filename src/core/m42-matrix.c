@@ -663,9 +663,9 @@ m42_value_linear_solve (const M42Value *a, const M42Value *b, gboolean decimal)
 /* --- eigenvalues ---------------------------------------------------------
  *
  * A symmetric matrix is turned by Jacobi rotations, which are steady and
- * give the eigenvectors as well.  Anything else goes through the QR
- * iteration; when a 2x2 block will not split, the eigenvalues there are
- * complex and math42 says so rather than inventing real ones.
+ * give the eigenvectors as well.  Anything else is balanced, brought to
+ * Hessenberg form and put through Francis's double-shift QR, which
+ * splits off each real eigenvalue and each complex pair in turn.
  */
 
 static gboolean
@@ -752,74 +752,293 @@ jacobi (M42Matrix *a, M42Matrix *v)
     }
 }
 
-/* Gram-Schmidt QR, used by the iteration below. */
+/* Rows and columns scaled against each other by powers of two until
+ * their sizes are alike, which changes no eigenvalue and makes the
+ * rounding in what follows fall evenly: Parlett and Reinsch. */
 static void
-qr_decompose (const M42Matrix *a, M42Matrix *q, M42Matrix *r)
+balance (M42Matrix *a)
 {
   guint n = a->rows;
+  gboolean done = FALSE;
 
-  for (guint j = 0; j < n; j++)
+  while (!done)
     {
-      g_autofree double *v = g_new (double, n);
-      double norm = 0;
-
+      done = TRUE;
       for (guint i = 0; i < n; i++)
-        v[i] = a->a[i * n + j];
-      for (guint k = 0; k < j; k++)
         {
-          double dot = 0;
-          for (guint i = 0; i < n; i++)
-            dot += q->a[i * n + k] * a->a[i * n + j];
-          *m42_matrix_at (r, k, j) = dot;
-          for (guint i = 0; i < n; i++)
-            v[i] -= dot * q->a[i * n + k];
+          double c = 0, r = 0;
+
+          for (guint j = 0; j < n; j++)
+            if (j != i)
+              {
+                c += fabs (*m42_matrix_at (a, j, i));
+                r += fabs (*m42_matrix_at (a, i, j));
+              }
+          if (c != 0 && r != 0)
+            {
+              double g = r / 2, f = 1, total = c + r;
+
+              while (c < g)
+                {
+                  f *= 2;
+                  c *= 4;
+                }
+              g = r * 2;
+              while (c > g)
+                {
+                  f /= 2;
+                  c /= 4;
+                }
+              if ((c + r) / f < 0.95 * total)
+                {
+                  done = FALSE;
+                  for (guint j = 0; j < n; j++)
+                    *m42_matrix_at (a, i, j) /= f;
+                  for (guint j = 0; j < n; j++)
+                    *m42_matrix_at (a, j, i) *= f;
+                }
+            }
         }
-      for (guint i = 0; i < n; i++)
-        norm += v[i] * v[i];
-      norm = sqrt (norm);
-      *m42_matrix_at (r, j, j) = norm;
-      for (guint i = 0; i < n; i++)
-        *m42_matrix_at (q, i, j) = norm > 1e-300 ? v[i] / norm : 0;
     }
 }
 
-/* The unshifted QR iteration: A = QR, then A <- RQ, until what is below
- * the diagonal has gone.  Returns FALSE when a 2x2 block survives. */
-static gboolean
-qr_iterate (M42Matrix *a)
+/* Down to upper Hessenberg form -- nothing below the first
+ * subdiagonal -- by elimination with pivoting, each step a similarity
+ * so that the eigenvalues stay as they were. */
+static void
+hessenberg (M42Matrix *a)
 {
   guint n = a->rows;
-  g_autoptr (M42Matrix) q = m42_matrix_new (n, n);
-  g_autoptr (M42Matrix) r = m42_matrix_new (n, n);
 
-  for (int iter = 0; iter < 2000; iter++)
+  for (guint m = 1; m + 1 < n; m++)
     {
-      gboolean converged = TRUE;
-      g_autoptr (M42Matrix) next = NULL;
+      double x = 0;
+      guint p = m;
 
-      for (guint i = 1; i < n; i++)
-        for (guint j = 0; j < i; j++)
-          if (fabs (*m42_matrix_at (a, i, j)) > 1e-11 * (1 + fabs (*m42_matrix_at (a, i, i))))
-            converged = FALSE;
-      if (converged)
-        return TRUE;
+      for (guint j = m; j < n; j++)
+        if (fabs (*m42_matrix_at (a, j, m - 1)) > fabs (x))
+          {
+            x = *m42_matrix_at (a, j, m - 1);
+            p = j;
+          }
+      if (p != m)
+        {
+          for (guint j = m - 1; j < n; j++)
+            {
+              double t = *m42_matrix_at (a, p, j);
 
-      qr_decompose (a, q, r);
-      next = m42_matrix_multiply (r, q);
-      if (next == NULL)
-        return FALSE;
-      memcpy (a->a, next->a, sizeof (double) * n * n);
+              *m42_matrix_at (a, p, j) = *m42_matrix_at (a, m, j);
+              *m42_matrix_at (a, m, j) = t;
+            }
+          for (guint j = 0; j < n; j++)
+            {
+              double t = *m42_matrix_at (a, j, p);
+
+              *m42_matrix_at (a, j, p) = *m42_matrix_at (a, j, m);
+              *m42_matrix_at (a, j, m) = t;
+            }
+        }
+      if (x == 0)
+        continue;
+      for (guint i = m + 1; i < n; i++)
+        {
+          double y = *m42_matrix_at (a, i, m - 1);
+
+          if (y == 0)
+            continue;
+          y /= x;
+          for (guint j = m; j < n; j++)
+            *m42_matrix_at (a, i, j) -= y * *m42_matrix_at (a, m, j);
+          for (guint j = 0; j < n; j++)
+            *m42_matrix_at (a, j, m) += y * *m42_matrix_at (a, j, i);
+          *m42_matrix_at (a, i, m - 1) = 0;
+        }
     }
+}
 
-  /* One last look: a lone subdiagonal entry left in a 2x2 block means a
-   * complex pair. */
-  for (guint i = 1; i < n; i++)
-    for (guint j = 0; j + 1 < i; j++)
-      if (fabs (*m42_matrix_at (a, i, j)) > 1e-8)
-        return FALSE;
-  for (guint i = 1; i < n; i++)
-    if (fabs (*m42_matrix_at (a, i, i - 1)) > 1e-8)
-      return FALSE;
+typedef struct { double re, im; } Eigenvalue;
+
+/* The eigenvalues of an upper Hessenberg matrix, by Francis's QR
+ * iteration with two shifts at a time, the roots of the trailing 2x2
+ * block, so that a complex pair is found in real arithmetic: the
+ * EISPACK routine hqr, as Numerical Recipes gives it.  A single or a
+ * double eigenvalue is deflated off the bottom whenever a subdiagonal
+ * entry has become negligible beside its neighbours, and an
+ * exceptional shift at the tenth and twentieth try breaks a cycle --
+ * which is what the unshifted iteration it replaces never could, so
+ * that it turned the permutation {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}}
+ * round and round and called its eigenvalues {0, 0, 0}.  FALSE if it
+ * does not settle. */
+static gboolean
+francis (M42Matrix *a, Eigenvalue *out)
+{
+  gint n = (gint) a->rows, nn = n - 1;
+  double anorm = 0, t = 0;
+  double p = 0, q = 0, r = 0, s, u, v, w, x, y, z;
+
+#define A(i, j) (*m42_matrix_at (a, (guint) (i), (guint) (j)))
+  for (gint i = 0; i < n; i++)
+    for (gint j = MAX (i - 1, 0); j < n; j++)
+      anorm += fabs (A (i, j));
+
+  while (nn >= 0)
+    {
+      gint its = 0, l, m;
+
+      do
+        {
+          /* Look for a single small subdiagonal element. */
+          for (l = nn; l >= 1; l--)
+            {
+              s = fabs (A (l - 1, l - 1)) + fabs (A (l, l));
+              if (s == 0)
+                s = anorm;
+              if (fabs (A (l, l - 1)) <= DBL_EPSILON * s)
+                {
+                  A (l, l - 1) = 0;
+                  break;
+                }
+            }
+          x = A (nn, nn);
+          if (l == nn)
+            {
+              /* One root found. */
+              out[nn].re = x + t;
+              out[nn--].im = 0;
+            }
+          else
+            {
+              y = A (nn - 1, nn - 1);
+              w = A (nn, nn - 1) * A (nn - 1, nn);
+              if (l == nn - 1)
+                {
+                  /* Two found: the roots of the 2x2 at the bottom. */
+                  p = 0.5 * (y - x);
+                  q = p * p + w;
+                  z = sqrt (fabs (q));
+                  x += t;
+                  if (q >= 0)
+                    {
+                      z = p + copysign (z, p);
+                      out[nn - 1].re = out[nn].re = x + z;
+                      if (z != 0)
+                        out[nn].re = x - w / z;
+                      out[nn - 1].im = out[nn].im = 0;
+                    }
+                  else
+                    {
+                      out[nn - 1].re = out[nn].re = x + p;
+                      out[nn - 1].im = -(out[nn].im = z);
+                    }
+                  nn -= 2;
+                }
+              else
+                {
+                  if (its == 60)
+                    return FALSE;
+                  if (its == 10 || its == 20)
+                    {
+                      /* An exceptional shift. */
+                      t += x;
+                      for (gint i = 0; i <= nn; i++)
+                        A (i, i) -= x;
+                      s = fabs (A (nn, nn - 1)) + fabs (A (nn - 1, nn - 2));
+                      y = x = 0.75 * s;
+                      w = -0.4375 * s * s;
+                    }
+                  its++;
+                  /* Two small subdiagonal elements in a row. */
+                  for (m = nn - 2; m >= l; m--)
+                    {
+                      z = A (m, m);
+                      r = x - z;
+                      s = y - z;
+                      p = (r * s - w) / A (m + 1, m) + A (m, m + 1);
+                      q = A (m + 1, m + 1) - z - r - s;
+                      r = A (m + 2, m + 1);
+                      s = fabs (p) + fabs (q) + fabs (r);
+                      p /= s;
+                      q /= s;
+                      r /= s;
+                      if (m == l)
+                        break;
+                      u = fabs (A (m, m - 1)) * (fabs (q) + fabs (r));
+                      v = fabs (p) * (fabs (A (m - 1, m - 1)) + fabs (z) +
+                                      fabs (A (m + 1, m + 1)));
+                      if (u <= DBL_EPSILON * v)
+                        break;
+                    }
+                  for (gint i = m + 2; i <= nn; i++)
+                    {
+                      A (i, i - 2) = 0;
+                      if (i != m + 2)
+                        A (i, i - 3) = 0;
+                    }
+                  /* The double step, chasing the bulge down. */
+                  for (gint k = m; k <= nn - 1; k++)
+                    {
+                      if (k != m)
+                        {
+                          p = A (k, k - 1);
+                          q = A (k + 1, k - 1);
+                          r = 0;
+                          if (k != nn - 1)
+                            r = A (k + 2, k - 1);
+                          if ((x = fabs (p) + fabs (q) + fabs (r)) != 0)
+                            {
+                              p /= x;
+                              q /= x;
+                              r /= x;
+                            }
+                        }
+                      if ((s = copysign (sqrt (p * p + q * q + r * r), p)) != 0)
+                        {
+                          gint last;
+
+                          if (k == m)
+                            {
+                              if (l != m)
+                                A (k, k - 1) = -A (k, k - 1);
+                            }
+                          else
+                            A (k, k - 1) = -s * x;
+                          p += s;
+                          x = p / s;
+                          y = q / s;
+                          z = r / s;
+                          q /= p;
+                          r /= p;
+                          for (gint j = k; j <= nn; j++)
+                            {
+                              p = A (k, j) + q * A (k + 1, j);
+                              if (k != nn - 1)
+                                {
+                                  p += r * A (k + 2, j);
+                                  A (k + 2, j) -= p * z;
+                                }
+                              A (k + 1, j) -= p * y;
+                              A (k, j) -= p * x;
+                            }
+                          last = nn < k + 3 ? nn : k + 3;
+                          for (gint i = l; i <= last; i++)
+                            {
+                              p = x * A (i, k) + y * A (i, k + 1);
+                              if (k != nn - 1)
+                                {
+                                  p += z * A (i, k + 2);
+                                  A (i, k + 2) -= p * r;
+                                }
+                              A (i, k + 1) -= p * q;
+                              A (i, k) -= p;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+      while (nn >= 0 && l < nn - 1);
+    }
+#undef A
   return TRUE;
 }
 
@@ -832,8 +1051,6 @@ tidy (double x)
     return round (x);
   return fabs (x) < 1e-12 ? 0 : x;
 }
-
-typedef struct { double re, im; } Eigenvalue;
 
 static int
 compare_eigenvalues (gconstpointer a, gconstpointer b)
@@ -848,6 +1065,38 @@ compare_eigenvalues (gconstpointer a, gconstpointer b)
   return x->im < y->im ? 1 : -1;
 }
 
+/* An eigenvalue with the rounding taken off: nothing when it is no
+ * bigger than the rounding in a matrix of that size, and, when every
+ * entry of the matrix is exact, the whole number it is a whisker from
+ * -- an eigenvalue of a matrix of whole numbers that is rational at
+ * all is whole.  Both are measured against the size of the matrix:
+ * rounded to a whole number within 10^-9 however small it was, the
+ * eigenvalue 10^-10 of {{10^-10, 1}, {0, 2}} came out as nothing. */
+static double
+eigen_tidy (double x, double scale, gboolean exact)
+{
+  if (fabs (x) <= 1e-14 * scale)
+    return 0;
+  if (exact && fabs (x - round (x)) <= 1e-12 * scale)
+    return round (x);
+  return x;
+}
+
+/* TRUE when every entry of a list of rows is an exact number. */
+static gboolean
+all_exact (const M42Value *v)
+{
+  for (guint i = 0; i < m42_value_list_length (v); i++)
+    {
+      M42Value *row = m42_value_list_nth ((M42Value *) v, i);
+
+      for (guint j = 0; j < m42_value_list_length (row); j++)
+        if (!m42_value_list_nth (row, j)->exact)
+          return FALSE;
+    }
+  return TRUE;
+}
+
 M42Value *
 m42_value_eigenvalues (const M42Value *v)
 {
@@ -855,70 +1104,51 @@ m42_value_eigenvalues (const M42Value *v)
   g_autoptr (GArray) vals = g_array_new (FALSE, FALSE, sizeof (Eigenvalue));
   M42Value *out;
   guint n;
+  double scale = 1;
+  gboolean exact;
 
   if (m == NULL || m->rows != m->cols)
     return m42_value_error ("Eigenvalues expects a square matrix");
   n = m->rows;
+  exact = all_exact (v);
+  for (guint i = 0; i < n * n; i++)
+    scale = MAX (scale, n * fabs (m->a[i]));
 
   if (is_symmetric (m))
     {
       jacobi (m, NULL);
       for (guint i = 0; i < n; i++)
         {
-          Eigenvalue e = { tidy (*m42_matrix_at (m, i, i)), 0 };
+          Eigenvalue e = { eigen_tidy (*m42_matrix_at (m, i, i), scale, exact), 0 };
           g_array_append_val (vals, e);
         }
     }
   else
     {
-      qr_iterate (m);
-      /* What the iteration leaves is triangular but for the odd 2x2
-       * block, whose pair of eigenvalues is complex; the quadratic
-       * formula finishes those off. */
+      g_autofree Eigenvalue *found = g_new0 (Eigenvalue, n);
+
+      balance (m);
+      hessenberg (m);
+      if (!francis (m, found))
+        return m42_value_error ("Eigenvalues: the QR iteration did not settle");
       for (guint i = 0; i < n; i++)
         {
-          gboolean block = i + 1 < n &&
-                           fabs (*m42_matrix_at (m, i + 1, i)) >
-                             1e-9 * (1 + fabs (*m42_matrix_at (m, i, i)));
-
-          if (block)
-            {
-              double a = *m42_matrix_at (m, i, i), b = *m42_matrix_at (m, i, i + 1);
-              double c = *m42_matrix_at (m, i + 1, i), d = *m42_matrix_at (m, i + 1, i + 1);
-              double trace = a + d, det = a * d - b * c;
-              double disc = trace * trace / 4 - det;
-
-              if (disc >= 0)
-                {
-                  Eigenvalue e1 = { tidy (trace / 2 + sqrt (disc)), 0 };
-                  Eigenvalue e2 = { tidy (trace / 2 - sqrt (disc)), 0 };
-                  g_array_append_val (vals, e1);
-                  g_array_append_val (vals, e2);
-                }
-              else
-                {
-                  Eigenvalue e1 = { tidy (trace / 2), tidy (sqrt (-disc)) };
-                  Eigenvalue e2 = { tidy (trace / 2), tidy (-sqrt (-disc)) };
-                  g_array_append_val (vals, e1);
-                  g_array_append_val (vals, e2);
-                }
-              i++;
-            }
-          else
-            {
-              Eigenvalue e = { tidy (*m42_matrix_at (m, i, i)), 0 };
-              g_array_append_val (vals, e);
-            }
+          Eigenvalue e = { eigen_tidy (found[i].re, scale, exact),
+                           eigen_tidy (found[i].im, scale, exact) };
+          g_array_append_val (vals, e);
         }
     }
 
   g_array_sort (vals, compare_eigenvalues);
 
+  /* A matrix with a decimal in it has decimal eigenvalues, whole or
+   * not. */
   out = m42_value_list_new ();
   for (guint i = 0; i < vals->len; i++)
     {
       Eigenvalue *e = &g_array_index (vals, Eigenvalue, i);
-      m42_value_list_append (out, m42_value_complex (e->re, e->im));
+      m42_value_list_append (out, e->im == 0 && !exact ? m42_value_real (e->re)
+                                                       : m42_value_complex (e->re, e->im));
     }
   return out;
 }
@@ -988,6 +1218,8 @@ m42_value_eigenvectors (const M42Value *v)
   g_autoptr (M42Matrix) vecs = NULL;
   M42Value *out;
   guint n;
+  double scale = 1;
+  gboolean exact;
 
   if (m == NULL || m->rows != m->cols)
     return m42_value_error ("Eigenvectors expects a square matrix");
@@ -1053,24 +1285,34 @@ m42_value_eigenvectors (const M42Value *v)
     }
 
   n = m->rows;
+  exact = all_exact (v);
+  for (guint i = 0; i < n * n; i++)
+    scale = MAX (scale, n * fabs (m->a[i]));
   vecs = m42_matrix_new (n, n);
   jacobi (m, vecs);
 
-  /* Largest eigenvalue first, to match Eigenvalues. */
+  /* In the order Eigenvalues gives them -- the largest in size first,
+   * and the larger of two the same size -- so that Eigensystem pairs
+   * each value with its own vector.  Taken largest first by sign, the
+   * vector of 1 in {{-3, 0}, {0, 1}} came out beside -3. */
   out = m42_value_list_new ();
   {
     g_autofree gboolean *taken = g_new0 (gboolean, n);
     for (guint k = 0; k < n; k++)
       {
         guint best = 0;
-        double best_val = -INFINITY;
+        gboolean any = FALSE;
         M42Value *row;
 
         for (guint i = 0; i < n; i++)
-          if (!taken[i] && *m42_matrix_at (m, i, i) > best_val)
+          if (!taken[i])
             {
-              best_val = *m42_matrix_at (m, i, i);
-              best = i;
+              Eigenvalue here = { eigen_tidy (*m42_matrix_at (m, i, i), scale, exact), 0 };
+              Eigenvalue there = { eigen_tidy (*m42_matrix_at (m, best, best), scale, exact), 0 };
+
+              if (!any || compare_eigenvalues (&here, &there) < 0)
+                best = i;
+              any = TRUE;
             }
         taken[best] = TRUE;
 

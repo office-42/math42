@@ -41,9 +41,9 @@ M42Matrix *m42_matrix_solve (const M42Matrix *a, const M42Matrix *b);      /* a 
 
 /* The value-level operations the evaluator exposes; each returns a new
  * value, an M42_VALUE_ERROR when the shapes do not fit. */
-/* Eigenvalues, largest first: Jacobi rotations for a symmetric matrix
- * and the QR iteration otherwise.  Complex eigenvalues are reported as
- * an error rather than silently dropped. */
+/* Eigenvalues, largest first: Jacobi rotations for a symmetric matrix,
+ * and otherwise Hessenberg form and Francis's double-shift QR, which
+ * gives a complex pair as a pair of complex numbers. */
 M42Value *m42_value_eigenvalues (const M42Value *v);
 /* Eigenvectors, one row each; symmetric matrices only. */
 M42Value *m42_value_eigenvectors (const M42Value *v);

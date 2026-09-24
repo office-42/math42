@@ -797,7 +797,7 @@ In[n]:= fft({1, 2, 3, 4})                     Out[n]= {10, -2 + 2 I, -2, -2 - 2 
 | `ConjugateTranspose`/`ctranspose` | rows for columns with every number conjugated |
 | `Dot[a, b]`, `a . b` | matrix multiplication |
 | `LinearSolve[a, b]`, `linsolve`, `a \ b` | solves a x = b |
-| `Eigenvalues`, `Eigenvectors`, `Eigensystem` | Jacobi for a symmetric matrix, QR otherwise. The vectors are what each eigenvalue sends to nothing, for any matrix whose eigenvalues are real; where there are fewer vectors than values, the gap is filled with a vector of nothing, as Mathematica fills it |
+| `Eigenvalues`, `Eigenvectors`, `Eigensystem` | Jacobi for a symmetric matrix; otherwise Hessenberg form and Francis's double-shift QR, which finds complex pairs as well as real eigenvalues. The vectors are what each eigenvalue sends to nothing, for any matrix whose eigenvalues are real; where there are fewer vectors than values, the gap is filled with a vector of nothing, as Mathematica fills it |
 | `MatrixPower`, `Rank`/`MatrixRank`, `Tr`, `Norm`, `Cross` | |
 | `Diagonal[m]`, `Diagonal[m, k]` | the diagonal, and the one k steps off it |
 | `CholeskyDecomposition[m]`, `chol` | the upper R with `R'.R` the matrix, for a positive definite one |

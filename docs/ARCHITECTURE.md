@@ -9,8 +9,9 @@ src/core/     the language -- GLib + libm, no GTK
   m42-parser    tokens to a syntax tree (recursive descent)
   m42-symbolic  trees as mathematics: printing, simplifying,
                 differentiating, integrating, expanding, substituting
-  m42-matrix    linear algebra: multiply, determinant, inverse, solve,
-                eigenvalues by Jacobi or QR
+  m42-matrix    linear algebra: multiply, determinant, inverse, solve --
+                exactly, on big numbers, for a matrix of exact ones --
+                and eigenvalues by Jacobi or Francis's QR
   m42-eval      the session: variables, scopes, builtins, control flow
   m42-help      every function with a line about it
 src/ui/       the window -- GTK 4
