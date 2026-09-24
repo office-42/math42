@@ -1789,58 +1789,9 @@ as_big_fraction (const M42Value *v, M42Big **top, M42Big **bottom)
   return FALSE;
 }
 
-/* top/bottom in lowest terms: the whole number it is, if it is one;
- * the exact fraction, if its two halves fit in a gint64; and
- * otherwise the decimal nearest it -- never a whole number it is not.
- * (2^100 + 1)/2^70 used to go to the doubles, which could not tell it
- * from 2^30, and came back as the exact 1073741824. */
-static M42Value *
-big_fraction (const M42Big *top, const M42Big *bottom)
-{
-  g_autoptr (M42Big) a = m42_big_copy (top);
-  g_autoptr (M42Big) b = m42_big_copy (bottom);
-  g_autoptr (M42Big) p = NULL;
-  g_autoptr (M42Big) q = NULL;
-  gint64 small_p, small_q;
-
-  if (m42_big_is_zero (bottom))
-    return NULL;
-  /* Euclid, on the sizes.  Past a few thousand digits a common factor
-   * would have to be nearly all of both for the answer to fit, and the
-   * search for one is not worth its time: the decimal is the answer. */
-  a->sign = a->sign != 0;
-  b->sign = 1;
-  if (a->len > 400 || b->len > 400)
-    return m42_value_real (m42_big_ratio (top, bottom));
-  while (!m42_big_is_zero (b))
-    {
-      M42Big *rest = NULL;
-
-      m42_big_free (m42_big_divide (a, b, &rest));
-      m42_big_free (a);
-      a = b;
-      b = rest;
-      b->sign = b->sign != 0;
-    }
-  if (m42_big_is_zero (a))
-    return m42_value_number (0);
-  p = m42_big_divide (top, a, NULL);
-  q = m42_big_divide (bottom, a, NULL);
-  if (q->sign < 0)
-    {
-      p->sign = -p->sign;
-      q->sign = 1;
-    }
-  if (m42_big_fits_int64 (q, &small_q) && small_q == 1)
-    return m42_value_bigint (g_steal_pointer (&p));
-  if (m42_big_fits_int64 (p, &small_p) && m42_big_fits_int64 (q, &small_q))
-    return m42_value_rational (small_p, small_q);
-  return m42_value_real (m42_big_ratio (p, q));
-}
-
 /* Arithmetic on exact numbers when at least one side has outgrown a
  * gint64: whole numbers exactly, and fractions of them as exactly as
- * big_fraction can give them back.  Returns NULL for a decimal, or
+ * m42_value_big_fraction can give them back.  Returns NULL for a decimal, or
  * anything else that is not exact work. */
 static M42Value *
 big_op (int op, const M42Value *a, const M42Value *b)
@@ -1868,14 +1819,16 @@ big_op (int op, const M42Value *a, const M42Value *b)
                                                     : m42_big_subtract (left, right);
         g_autoptr (M42Big) bottom = m42_big_multiply (x_under, y_under);
 
-        return whole ? m42_value_bigint (g_steal_pointer (&top)) : big_fraction (top, bottom);
+        return whole ? m42_value_bigint (g_steal_pointer (&top))
+                     : m42_value_big_fraction (top, bottom);
       }
     case M42_TOK_STAR:
       {
         g_autoptr (M42Big) top = m42_big_multiply (x, y);
         g_autoptr (M42Big) bottom = m42_big_multiply (x_under, y_under);
 
-        return whole ? m42_value_bigint (g_steal_pointer (&top)) : big_fraction (top, bottom);
+        return whole ? m42_value_bigint (g_steal_pointer (&top))
+                     : m42_value_big_fraction (top, bottom);
       }
     case M42_TOK_SLASH:
       {
@@ -1893,7 +1846,7 @@ big_op (int op, const M42Value *a, const M42Value *b)
             if (m42_big_is_zero (rest))
               return m42_value_bigint (g_steal_pointer (&quotient));
           }
-        return big_fraction (top, bottom);
+        return m42_value_big_fraction (top, bottom);
       }
     case M42_TOK_CARET:
       {
@@ -12946,19 +12899,21 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
         turned = m42_value_transpose (ARG (0));
       return is_error (turned) ? g_steal_pointer (&turned) : conjugate_value (turned);
     }
+  /* Exact on exact numbers under Mathematica's names, and decimals
+   * under MATLAB's, as everywhere else. */
   if (name_is (name, "Det", "det") && args->len == 1)
-    return m42_value_det (ARG (0));
+    return m42_value_det (ARG (0), !g_ascii_isupper (name[0]));
   if (name_is (name, "Inverse", "inv") && args->len == 1)
-    return m42_value_inverse (ARG (0));
+    return m42_value_inverse (ARG (0), !g_ascii_isupper (name[0]));
   if (name_is (name, "Dot", "mtimes") && args->len == 2)
     return m42_value_dot (ARG (0), ARG (1));
   if ((name_is (name, "LinearSolve", "mldivide") ||
        name_is (name, "LinearSolve", "linsolve")) && args->len == 2)
-    return m42_value_linear_solve (ARG (0), ARG (1));
+    return m42_value_linear_solve (ARG (0), ARG (1), !g_ascii_isupper (name[0]));
   if (name_is (name, "RowReduce", "rref") && args->len == 1)
-    return m42_value_row_reduce (ARG (0));
+    return m42_value_row_reduce (ARG (0), !g_ascii_isupper (name[0]));
   if (name_is (name, "NullSpace", "null") && args->len == 1)
-    return m42_value_null_space (ARG (0));
+    return m42_value_null_space (ARG (0), !g_ascii_isupper (name[0]));
   if (name_is (name, "Orthogonalize", "orth") && args->len == 1)
     return m42_value_orthogonalize (ARG (0));
   if (name_is (name, "LeastSquares", "lscov") && args->len == 2)
@@ -13423,12 +13378,16 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
   if ((name_is (name, "Rank", "rank") || name_is (name, "MatrixRank", NULL)) &&
       args->len == 1)
     {
-      /* The rank as row reduction finds it. */
+      /* The rank as row reduction finds it: exactly, for a matrix of
+       * exact numbers, and otherwise with a tolerance. */
       g_autoptr (M42Matrix) m = m42_matrix_from_value (ARG (0), FALSE);
       guint rank = 0;
+      int exact_rank = m42_value_exact_rank (ARG (0));
 
       if (m == NULL)
         return m42_value_error ("%s expects a matrix", name);
+      if (exact_rank >= 0)
+        return m42_value_number (exact_rank);
       for (guint col = 0, row = 0; col < m->cols && row < m->rows; col++)
         {
           guint pivot = row;
@@ -18866,7 +18825,7 @@ eval (M42Session *s, const M42Node *n)
         if (n->op == M42_TOK_DOT)
           return m42_value_dot (a, b);
         if (n->op == M42_TOK_BACKSLASH)
-          return m42_value_linear_solve (a, b);   /* MATLAB's A \ b */
+          return m42_value_linear_solve (a, b, TRUE);   /* MATLAB's A \ b */
         return map2 (n->op, a, b);
       }
 

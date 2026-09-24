@@ -6,6 +6,7 @@
 
 #include "m42-matrix.h"
 
+#include <float.h>
 #include <math.h>
 #include <string.h>
 
@@ -109,12 +110,26 @@ m42_matrix_multiply (const M42Matrix *a, const M42Matrix *b)
 
 /* Gauss-Jordan with partial pivoting on [a | b], leaving b as the
  * solution; returns FALSE if a is singular.  With b the identity this
- * inverts; with b a column it solves. */
+ * inverts; with b a column it solves.
+ *
+ * Singular means singular to working precision: a pivot no larger
+ * than the rounding the elimination has left in the row it came from,
+ * measured by that row's largest entry as it was given, so that a
+ * matrix that is only badly scaled is not taken for a singular one.
+ * The test used to be a pivot below 10^-300, which any real matrix
+ * passes, so inv([1 2 3; 4 5 6; 7 8 9]) came back with entries of
+ * 6 10^14 made of nothing but rounding.  A determinant is asked only
+ * whether a pivot is nothing at all, since a small one is its answer. */
 static gboolean
 gauss_jordan (M42Matrix *a, M42Matrix *b, double *det)
 {
   guint n = a->rows;
   double d = 1.0;
+  g_autofree double *size = g_new0 (double, n);
+
+  for (guint i = 0; i < n; i++)
+    for (guint j = 0; j < a->cols; j++)
+      size[i] = MAX (size[i], fabs (*m42_matrix_at (a, i, j)));
 
   for (guint col = 0; col < n; col++)
     {
@@ -127,7 +142,7 @@ gauss_jordan (M42Matrix *a, M42Matrix *b, double *det)
             best = fabs (*m42_matrix_at (a, r, col));
             pivot = r;
           }
-      if (best < 1e-300)
+      if (best == 0 || (b != NULL && best <= n * DBL_EPSILON * size[pivot]))
         {
           if (det != NULL)
             *det = 0;
@@ -148,6 +163,12 @@ gauss_jordan (M42Matrix *a, M42Matrix *b, double *det)
                 *m42_matrix_at (b, col, j) = *m42_matrix_at (b, pivot, j);
                 *m42_matrix_at (b, pivot, j) = t;
               }
+          {
+            double t = size[col];
+
+            size[col] = size[pivot];
+            size[pivot] = t;
+          }
           d = -d;
         }
 
@@ -229,6 +250,254 @@ m42_matrix_solve (const M42Matrix *a, const M42Matrix *b)
   return x;
 }
 
+/* --- exact elimination ---------------------------------------------------
+ *
+ * A matrix of exact numbers -- whole ones and fractions, as Mathematica's
+ * {{1, 2}, {3, 4}} is -- is reduced exactly rather than in doubles,
+ * which made Inverse[{{1, 2}, {3, 4}}] {{-2, 1}, {1.5, -0.5}} and the
+ * determinant of a singular matrix -4.66e-15.  Each row is multiplied
+ * through by the least common multiple of its denominators, so that it
+ * is whole, and then Gauss-Jordan is done without fractions, Bareiss's
+ * way: after each pivot every entry is a minor of the matrix, the
+ * division that keeps it one is exact, and every pivot so far comes
+ * to equal the latest.  Big numbers throughout, so that nothing
+ * overflows on the way; the answers are made fractions again, in
+ * lowest terms, only at the end.
+ */
+
+typedef struct {
+  guint     rows, cols;
+  M42Big  **a;        /* rows * cols, owned */
+  M42Big   *scale;    /* what all the rows were multiplied by, together */
+  int       sign;     /* -1 for an odd number of rows swapped */
+  M42Big   *pivot;    /* the last pivot; the others have come to equal it */
+  GArray   *pivots;   /* of guint: the pivot column of each pivot row */
+} Exact;
+
+static void
+exact_free (Exact *e)
+{
+  if (e == NULL)
+    return;
+  for (guint i = 0; i < e->rows * e->cols; i++)
+    m42_big_free (e->a[i]);
+  g_free (e->a);
+  m42_big_free (e->scale);
+  m42_big_free (e->pivot);
+  g_array_unref (e->pivots);
+  g_free (e);
+}
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (Exact, exact_free)
+
+#define EXACT_AT(e, i, j) ((e)->a[(i) * (e)->cols + (j)])
+
+/* The entry of a list of rows (or of a vector, standing as a column),
+ * or NULL past its edge. */
+static const M42Value *
+entry (const M42Value *v, guint i, guint j)
+{
+  M42Value *row = m42_value_list_nth ((M42Value *) v, i);
+
+  return row->kind == M42_VALUE_LIST ? m42_value_list_nth (row, j) : row;
+}
+
+/* [a | b], or [a | I] with identity, made whole row by row; NULL when an
+ * entry is not exact, and the doubles do the work.  They do it too past
+ * forty by forty or so, where the entries have grown to hundreds of
+ * digits and an exact inverse takes a second and climbing with the cube
+ * of the size -- a hundred by a hundred took ten. */
+static Exact *
+exact_new (const M42Value *a, const M42Value *b, gboolean identity)
+{
+  guint rows, cols, extra = 0, b_rows = 0, b_cols = 0;
+  Exact *e;
+
+  if (!m42_value_is_matrix (a, &rows, &cols) || rows * cols > 1600)
+    return NULL;
+  if (b != NULL)
+    {
+      if (m42_value_is_matrix (b, &b_rows, &b_cols))
+        extra = b_cols;
+      else if (m42_value_is_vector (b) && (b_rows = m42_value_list_length (b)) > 0)
+        extra = 1;
+      else
+        return NULL;
+      if (b_rows != rows)
+        return NULL;
+    }
+  if (identity)
+    extra = rows;
+
+  e = g_new0 (Exact, 1);
+  e->rows = rows;
+  e->cols = cols + extra;
+  e->a = g_new0 (M42Big *, (gsize) e->rows * e->cols);
+  e->scale = m42_big_from_int64 (1);
+  e->sign = 1;
+  e->pivots = g_array_new (FALSE, FALSE, sizeof (guint));
+
+  for (guint i = 0; i < rows; i++)
+    {
+      g_autofree gint64 *num = g_new (gint64, e->cols);
+      g_autofree gint64 *den = g_new (gint64, e->cols);
+      g_autoptr (M42Big) multiple = m42_big_from_int64 (1);
+
+      for (guint j = 0; j < e->cols; j++)
+        {
+          const M42Value *x;
+
+          if (j >= cols && identity)
+            {
+              num[j] = j - cols == i;
+              den[j] = 1;
+              continue;
+            }
+          x = j < cols ? entry (a, i, j) : entry (b, i, j - cols);
+          if (x->kind != M42_VALUE_NUMBER || !x->exact)
+            {
+              exact_free (e);
+              return NULL;
+            }
+          num[j] = x->num;
+          den[j] = x->den;
+        }
+
+      /* The least common multiple of the row's denominators. */
+      for (guint j = 0; j < e->cols; j++)
+        {
+          gint64 rest = 0, g = den[j], t;
+
+          m42_big_free (m42_big_divide_small (multiple, den[j], &rest));
+          for (gint64 u = rest; u != 0; u = t)
+            {
+              t = g % u;
+              g = u;
+            }
+          if (g != den[j])
+            {
+              g_autoptr (M42Big) part = m42_big_divide_small (multiple, g, NULL);
+              g_autoptr (M42Big) times = m42_big_from_int64 (den[j]);
+
+              m42_big_free (multiple);
+              multiple = m42_big_multiply (part, times);
+            }
+        }
+      for (guint j = 0; j < e->cols; j++)
+        {
+          g_autoptr (M42Big) share = m42_big_divide_small (multiple, den[j], NULL);
+          g_autoptr (M42Big) top = m42_big_from_int64 (num[j]);
+
+          EXACT_AT (e, i, j) = m42_big_multiply (top, share);
+        }
+      {
+        M42Big *scale = m42_big_multiply (e->scale, multiple);
+
+        m42_big_free (e->scale);
+        e->scale = scale;
+      }
+    }
+  return e;
+}
+
+/* Gauss-Jordan without fractions, pivoting in the first through
+ * columns only: [A | b] is reduced on A's. */
+static void
+exact_eliminate (Exact *e, guint through)
+{
+  M42Big *previous = m42_big_from_int64 (1);
+  guint row = 0;
+
+  for (guint col = 0; col < through && row < e->rows; col++)
+    {
+      guint p = row;
+
+      while (p < e->rows && m42_big_is_zero (EXACT_AT (e, p, col)))
+        p++;
+      if (p == e->rows)
+        continue;
+      if (p != row)
+        {
+          for (guint j = 0; j < e->cols; j++)
+            {
+              M42Big *t = EXACT_AT (e, p, j);
+
+              EXACT_AT (e, p, j) = EXACT_AT (e, row, j);
+              EXACT_AT (e, row, j) = t;
+            }
+          e->sign = -e->sign;
+        }
+      for (guint i = 0; i < e->rows; i++)
+        {
+          if (i == row)
+            continue;
+          for (guint j = 0; j < e->cols; j++)
+            {
+              g_autoptr (M42Big) left = NULL;
+              g_autoptr (M42Big) right = NULL;
+              g_autoptr (M42Big) difference = NULL;
+
+              if (j == col)
+                continue;
+              left = m42_big_multiply (EXACT_AT (e, row, col), EXACT_AT (e, i, j));
+              right = m42_big_multiply (EXACT_AT (e, i, col), EXACT_AT (e, row, j));
+              difference = m42_big_subtract (left, right);
+              m42_big_free (EXACT_AT (e, i, j));
+              EXACT_AT (e, i, j) = m42_big_divide (difference, previous, NULL);
+            }
+          m42_big_free (EXACT_AT (e, i, col));
+          EXACT_AT (e, i, col) = m42_big_from_int64 (0);
+        }
+      m42_big_free (previous);
+      previous = m42_big_copy (EXACT_AT (e, row, col));
+      g_array_append_val (e->pivots, col);
+      row++;
+    }
+  e->pivot = previous;
+}
+
+/* An entry of the reduced matrix as the fraction it stands for: over
+ * its row's pivot, which every pivot row has come to share. */
+static M42Value *
+exact_entry (const Exact *e, guint i, guint j)
+{
+  return m42_value_big_fraction (EXACT_AT (e, i, j), e->pivot);
+}
+
+/* The same answer as decimals, which is what a MATLAB spelling hands
+ * back whatever it was given.  Takes the value. */
+static M42Value *
+decimals (M42Value *v)
+{
+  M42Value *out;
+
+  if (v->kind == M42_VALUE_BIGINT)
+    out = m42_value_real (m42_big_to_double (v->u.big));
+  else if (v->kind == M42_VALUE_NUMBER)
+    out = m42_value_real (v->u.number);
+  else if (v->kind == M42_VALUE_LIST)
+    {
+      out = m42_value_list_new ();
+      for (guint i = 0; i < m42_value_list_length (v); i++)
+        m42_value_list_append (out, decimals (m42_value_ref (m42_value_list_nth (v, i))));
+    }
+  else
+    return v;
+  m42_value_unref (v);
+  return out;
+}
+
+int
+m42_value_exact_rank (const M42Value *v)
+{
+  g_autoptr (Exact) e = exact_new (v, NULL, FALSE);
+
+  if (e == NULL)
+    return -1;
+  exact_eliminate (e, e->cols);
+  return (int) e->pivots->len;
+}
+
 /* --- value level ------------------------------------------------------- */
 
 M42Value *
@@ -271,43 +540,123 @@ m42_value_transpose (const M42Value *v)
 }
 
 M42Value *
-m42_value_det (const M42Value *v)
+m42_value_det (const M42Value *v, gboolean decimal)
 {
   g_autoptr (M42Matrix) m = m42_matrix_from_value (v, FALSE);
+  g_autoptr (Exact) e = NULL;
 
   if (m == NULL || m->rows != m->cols)
     return m42_value_error ("Det expects a square matrix");
+  e = exact_new (v, NULL, FALSE);
+  if (e != NULL)
+    {
+      /* The last pivot is the determinant of the matrix made whole;
+       * the multiples the rows were made whole by come off again. */
+      M42Value *det;
+
+      exact_eliminate (e, e->cols);
+      if (e->pivots->len < e->rows)
+        det = m42_value_number (0);
+      else
+        {
+          g_autoptr (M42Big) top = m42_big_copy (e->pivot);
+
+          top->sign *= e->sign;
+          det = m42_value_big_fraction (top, e->scale);
+        }
+      return decimal ? decimals (det) : det;
+    }
   return m42_value_number (m42_matrix_det (m));
 }
 
+/* MATLAB says a matrix is singular to working precision, and goes on
+ * with Infinity; math42 says so and stops, as it does for anything else
+ * it cannot do.  Mathematica says it in its own words. */
+static M42Value *
+singular (const char *who, gboolean decimal)
+{
+  if (decimal)
+    return m42_value_error ("%s: matrix is singular to working precision", who);
+  return m42_value_error ("%s: the matrix is singular", who);
+}
+
 M42Value *
-m42_value_inverse (const M42Value *v)
+m42_value_inverse (const M42Value *v, gboolean decimal)
 {
   g_autoptr (M42Matrix) m = m42_matrix_from_value (v, FALSE);
   g_autoptr (M42Matrix) inv = NULL;
+  g_autoptr (Exact) e = NULL;
 
   if (m == NULL || m->rows != m->cols)
     return m42_value_error ("Inverse expects a square matrix");
+  e = exact_new (v, NULL, TRUE);
+  if (e != NULL)
+    {
+      M42Value *out;
+
+      exact_eliminate (e, m->rows);
+      if (e->pivots->len < m->rows)
+        return singular (decimal ? "inv" : "Inverse", decimal);
+      out = m42_value_list_new ();
+      for (guint i = 0; i < m->rows; i++)
+        {
+          M42Value *row = m42_value_list_new ();
+
+          for (guint j = 0; j < m->rows; j++)
+            m42_value_list_append (row, exact_entry (e, i, m->rows + j));
+          m42_value_list_append (out, row);
+        }
+      return decimal ? decimals (out) : out;
+    }
   inv = m42_matrix_inverse (m);
   if (inv == NULL)
-    return m42_value_error ("Inverse: the matrix is singular");
+    return singular (decimal ? "inv" : "Inverse", decimal);
   return m42_matrix_to_value (inv, FALSE);
 }
 
 M42Value *
-m42_value_linear_solve (const M42Value *a, const M42Value *b)
+m42_value_linear_solve (const M42Value *a, const M42Value *b, gboolean decimal)
 {
   g_autoptr (M42Matrix) ma = m42_matrix_from_value (a, FALSE);
   g_autoptr (M42Matrix) mb = m42_matrix_from_value (b, TRUE);
   g_autoptr (M42Matrix) x = NULL;
+  g_autoptr (Exact) e = NULL;
+  const char *who = decimal ? "mldivide" : "LinearSolve";
 
   if (ma == NULL || ma->rows != ma->cols)
     return m42_value_error ("LinearSolve expects a square matrix");
   if (mb == NULL || mb->rows != ma->rows)
     return m42_value_error ("LinearSolve: the right-hand side does not fit");
+  e = exact_new (a, b, FALSE);
+  if (e != NULL)
+    {
+      guint n = ma->rows;
+      M42Value *out = m42_value_list_new ();
+
+      exact_eliminate (e, n);
+      if (e->pivots->len < n)
+        {
+          m42_value_unref (out);
+          return singular (who, decimal);
+        }
+      for (guint i = 0; i < n; i++)
+        {
+          if (m42_value_is_vector (b))
+            m42_value_list_append (out, exact_entry (e, i, n));
+          else
+            {
+              M42Value *row = m42_value_list_new ();
+
+              for (guint j = n; j < e->cols; j++)
+                m42_value_list_append (row, exact_entry (e, i, j));
+              m42_value_list_append (out, row);
+            }
+        }
+      return decimal ? decimals (out) : out;
+    }
   x = m42_matrix_solve (ma, mb);
   if (x == NULL)
-    return m42_value_error ("LinearSolve: the matrix is singular");
+    return singular (who, decimal);
   return m42_matrix_to_value (x, m42_value_is_vector (b));
 }
 
@@ -830,29 +1179,108 @@ row_reduce (const M42Matrix *m, GArray *pivots)
   return r;
 }
 
+/* Minus an entry of an exact reduction, which may be a big number. */
+static M42Value *
+negated (const M42Value *x)
+{
+  if (x->kind == M42_VALUE_BIGINT)
+    {
+      M42Big *minus = m42_big_copy (x->u.big);
+
+      minus->sign = -minus->sign;
+      return m42_value_bigint (minus);
+    }
+  if (x->exact && x->num != G_MININT64)
+    return m42_value_rational (-x->num, x->den);
+  return m42_value_real (-x->u.number);
+}
+
+/* The reduced row echelon form of an exact matrix, exactly, with its
+ * pivot columns; NULL for one with decimals in it. */
+static M42Value *
+exact_row_reduce (const M42Value *v, GArray *pivots)
+{
+  g_autoptr (Exact) e = exact_new (v, NULL, FALSE);
+  M42Value *out;
+
+  if (e == NULL)
+    return NULL;
+  exact_eliminate (e, e->cols);
+  out = m42_value_list_new ();
+  for (guint i = 0; i < e->rows; i++)
+    {
+      M42Value *row = m42_value_list_new ();
+
+      for (guint j = 0; j < e->cols; j++)
+        m42_value_list_append (row, i < e->pivots->len ? exact_entry (e, i, j)
+                                                       : m42_value_number (0));
+      m42_value_list_append (out, row);
+    }
+  if (pivots != NULL)
+    g_array_append_vals (pivots, e->pivots->data, e->pivots->len);
+  return out;
+}
+
 M42Value *
-m42_value_row_reduce (const M42Value *v)
+m42_value_row_reduce (const M42Value *v, gboolean decimal)
 {
   g_autoptr (M42Matrix) m = m42_matrix_from_value (v, FALSE);
   g_autoptr (M42Matrix) r = NULL;
+  M42Value *exact;
 
   if (m == NULL)
     return m42_value_error ("RowReduce expects a matrix");
+  exact = exact_row_reduce (v, NULL);
+  if (exact != NULL)
+    return decimal ? decimals (exact) : exact;
   r = row_reduce (m, NULL);
   return m42_matrix_to_value (r, FALSE);
 }
 
 /* The null space: one vector for each column without a pivot. */
 M42Value *
-m42_value_null_space (const M42Value *v)
+m42_value_null_space (const M42Value *v, gboolean decimal)
 {
   g_autoptr (M42Matrix) m = m42_matrix_from_value (v, FALSE);
   g_autoptr (GArray) pivots = g_array_new (FALSE, FALSE, sizeof (guint));
   g_autoptr (M42Matrix) r = NULL;
+  g_autoptr (M42Value) exact = NULL;
   M42Value *out;
 
   if (m == NULL)
     return m42_value_error ("NullSpace expects a matrix");
+  exact = exact_row_reduce (v, pivots);
+  if (exact != NULL)
+    {
+      /* The same as below, but with the reduced rows as they are. */
+      out = m42_value_list_new ();
+      for (guint col = 0; col < m->cols; col++)
+        {
+          gboolean is_pivot = FALSE;
+          M42Value *vector;
+
+          for (guint i = 0; i < pivots->len; i++)
+            if (g_array_index (pivots, guint, i) == col)
+              is_pivot = TRUE;
+          if (is_pivot)
+            continue;
+          vector = m42_value_list_new ();
+          for (guint j = 0; j < m->cols; j++)
+            {
+              M42Value *x = NULL;
+
+              if (j == col)
+                x = m42_value_number (1);
+              else
+                for (guint i = 0; i < pivots->len && x == NULL; i++)
+                  if (g_array_index (pivots, guint, i) == j)
+                    x = negated (m42_value_list_nth (m42_value_list_nth (exact, i), col));
+              m42_value_list_append (vector, x != NULL ? x : m42_value_number (0));
+            }
+          m42_value_list_append (out, vector);
+        }
+      return decimal ? decimals (out) : out;
+    }
   r = row_reduce (m, pivots);
   out = m42_value_list_new ();
 

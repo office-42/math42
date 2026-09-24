@@ -49,9 +49,12 @@ M42Value *m42_value_eigenvalues (const M42Value *v);
 M42Value *m42_value_eigenvectors (const M42Value *v);
 M42Value *m42_value_matrix_power (const M42Value *v, int k);
 
-/* Row reduction, and what a linear algebra course builds on it. */
-M42Value *m42_value_row_reduce (const M42Value *v);
-M42Value *m42_value_null_space (const M42Value *v);
+/* Row reduction, and what a linear algebra course builds on it.  These,
+ * and Det, Inverse and LinearSolve below, work exactly on a matrix of
+ * exact numbers; decimal asks for the answer as decimals all the same,
+ * which is what a MATLAB spelling wants. */
+M42Value *m42_value_row_reduce (const M42Value *v, gboolean decimal);
+M42Value *m42_value_null_space (const M42Value *v, gboolean decimal);
 M42Value *m42_value_orthogonalize (const M42Value *v);
 M42Value *m42_value_least_squares (const M42Value *a, const M42Value *b);
 /* The coefficients of det(A - x I), lowest power first. */
@@ -70,9 +73,12 @@ M42Value *m42_value_eigensystem (const M42Value *v);
 
 M42Value *m42_value_dot (const M42Value *a, const M42Value *b);
 M42Value *m42_value_transpose (const M42Value *v);
-M42Value *m42_value_det (const M42Value *v);
-M42Value *m42_value_inverse (const M42Value *v);
-M42Value *m42_value_linear_solve (const M42Value *a, const M42Value *b);
+M42Value *m42_value_det (const M42Value *v, gboolean decimal);
+M42Value *m42_value_inverse (const M42Value *v, gboolean decimal);
+M42Value *m42_value_linear_solve (const M42Value *a, const M42Value *b, gboolean decimal);
+/* The rank of a matrix of exact numbers, found exactly; -1 when it has
+ * a decimal in it. */
+int       m42_value_exact_rank (const M42Value *v);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (M42Matrix, m42_matrix_free)
 

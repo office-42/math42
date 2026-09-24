@@ -143,6 +143,10 @@ M42Value *m42_value_complex (double re, double im);
 /* A big whole number.  It takes the number, and hands back an ordinary
  * exact one when it turns out to fit in a gint64 after all. */
 M42Value *m42_value_bigint (M42Big *big);
+/* top/bottom in lowest terms: a whole number if it is one, an exact
+ * fraction if its halves fit in a gint64, and otherwise the decimal
+ * nearest it; NULL if bottom is nothing. */
+M42Value *m42_value_big_fraction (const M42Big *top, const M42Big *bottom);
 M42Value *m42_value_list_new (void);
 M42Value *m42_value_expr (M42Node *node);              /* takes the node */
 M42Value *m42_value_func (GStrv params, M42Node *body); /* takes both */

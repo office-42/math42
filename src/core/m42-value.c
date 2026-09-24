@@ -136,6 +136,55 @@ m42_value_rational (gint64 num, gint64 den)
   return v;
 }
 
+/* top/bottom in lowest terms: the whole number it is, if it is one;
+ * the exact fraction, if its two halves fit in a gint64; and
+ * otherwise the decimal nearest it -- never a whole number it is not.
+ * (2^100 + 1)/2^70 used to go to the doubles, which could not tell it
+ * from 2^30, and came back as the exact 1073741824. */
+M42Value *
+m42_value_big_fraction (const M42Big *top, const M42Big *bottom)
+{
+  g_autoptr (M42Big) a = m42_big_copy (top);
+  g_autoptr (M42Big) b = m42_big_copy (bottom);
+  g_autoptr (M42Big) p = NULL;
+  g_autoptr (M42Big) q = NULL;
+  gint64 small_p, small_q;
+
+  if (m42_big_is_zero (bottom))
+    return NULL;
+  /* Euclid, on the sizes.  Past a few thousand digits a common factor
+   * would have to be nearly all of both for the answer to fit, and the
+   * search for one is not worth its time: the decimal is the answer. */
+  a->sign = a->sign != 0;
+  b->sign = 1;
+  if (a->len > 400 || b->len > 400)
+    return m42_value_real (m42_big_ratio (top, bottom));
+  while (!m42_big_is_zero (b))
+    {
+      M42Big *rest = NULL;
+
+      m42_big_free (m42_big_divide (a, b, &rest));
+      m42_big_free (a);
+      a = b;
+      b = rest;
+      b->sign = b->sign != 0;
+    }
+  if (m42_big_is_zero (a))
+    return m42_value_number (0);
+  p = m42_big_divide (top, a, NULL);
+  q = m42_big_divide (bottom, a, NULL);
+  if (q->sign < 0)
+    {
+      p->sign = -p->sign;
+      q->sign = 1;
+    }
+  if (m42_big_fits_int64 (q, &small_q) && small_q == 1)
+    return m42_value_bigint (g_steal_pointer (&p));
+  if (m42_big_fits_int64 (p, &small_p) && m42_big_fits_int64 (q, &small_q))
+    return m42_value_rational (small_p, small_q);
+  return m42_value_real (m42_big_ratio (p, q));
+}
+
 M42Value *
 m42_value_list_new (void)
 {
