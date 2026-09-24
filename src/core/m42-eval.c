@@ -18153,29 +18153,97 @@ interpolation_function (M42Session *s, const M42Value *data)
  * of the name says whether it is a table or plain text.
  */
 
-/* One line of a comma-separated file as a list: a number where the
- * field is one, and the text otherwise. */
+/* One field of a comma-separated file, read from *at up to the
+ * separator, the line break or the end of the text that closes it, and
+ * *at left there.  As RFC 4180 has it: a field in double quotes may
+ * hold the separator and a line break, "" inside it is one quote, and
+ * it is text whatever it looks like -- which is how Export writes a
+ * string, so that "007" comes back as it went.  A field without quotes
+ * is a number when all of it is one and the text otherwise, spaces
+ * round it trimmed; an empty one is missing, and what stands in for it
+ * is the caller's to say.  The fields used to be found by splitting the
+ * line at every comma, so "x, y" became two fields with a quote at the
+ * end of each, and an empty one was dropped, moving every field after
+ * it one column to the left. */
 static M42Value *
-csv_row (const char *line, char separator)
+csv_field (const char **at, char separator, M42Value *missing)
 {
-  M42Value *row = m42_value_list_new ();
-  g_auto (GStrv) fields = g_strsplit (line, separator == 0 ? "," : (char[]) { separator, 0 }, -1);
+  g_autoptr (GString) text = g_string_new (NULL);
+  const char *p = *at;
 
-  for (guint i = 0; fields[i] != NULL; i++)
+  if (*p == '"')
     {
-      char *field = g_strstrip (fields[i]);
-      char *end = NULL;
-      double x;
-
-      if (*field == 0)
-        continue;
-      x = g_ascii_strtod (field, &end);
-      if (end != NULL && *end == 0)
-        m42_value_list_append (row, m42_value_real (x));
-      else
-        m42_value_list_append (row, m42_value_string (field));
+      for (p++; *p != 0; p++)
+        {
+          if (*p == '"' && p[1] == '"')
+            p++;
+          else if (*p == '"')
+            {
+              p++;
+              break;
+            }
+          g_string_append_c (text, *p);
+        }
+      /* Anything between the closing quote and the separator is a file
+       * written wrongly; it is kept rather than lost. */
+      while (*p != 0 && *p != separator && *p != '\n' && *p != '\r')
+        g_string_append_c (text, *p++);
+      *at = p;
+      return m42_value_string (text->str);
     }
-  return row;
+
+  while (*p != 0 && *p != separator && *p != '\n' && *p != '\r')
+    g_string_append_c (text, *p++);
+  *at = p;
+  g_strstrip (text->str);
+  if (text->str[0] == 0)
+    return m42_value_ref (missing);
+  {
+    char *end = NULL;
+    double x = g_ascii_strtod (text->str, &end);
+
+    if (end != NULL && *end == 0)
+      return m42_value_real (x);
+  }
+  return m42_value_string (text->str);
+}
+
+/* A comma-separated file as a list of rows.  A line break is CRLF or a
+ * bare LF, one inside quotes belongs to the field, a line with nothing
+ * on it is passed over, and a UTF-8 byte order mark at the start is
+ * not part of the first field. */
+static M42Value *
+csv_table (const char *text, char separator, M42Value *missing)
+{
+  M42Value *out = m42_value_list_new ();
+  const char *p = text;
+
+  if (g_str_has_prefix (p, "\xef\xbb\xbf"))
+    p += 3;
+  while (*p != 0)
+    {
+      M42Value *row;
+
+      if (*p == '\r' || *p == '\n')
+        {
+          p += *p == '\r' && p[1] == '\n' ? 2 : 1;
+          continue;
+        }
+      row = m42_value_list_new ();
+      for (;;)
+        {
+          m42_value_list_append (row, csv_field (&p, separator, missing));
+          if (*p != separator)
+            break;
+          p++;
+        }
+      m42_value_list_append (out, row);
+      if (*p == '\r')
+        p++;
+      if (*p == '\n')
+        p++;
+    }
+  return out;
 }
 
 static M42Value *
@@ -18246,22 +18314,14 @@ import_file (const char *path, const char *what)
 
   {
     char separator = g_str_has_suffix (lower, ".tsv") ? '\t' : ',';
-    g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
-    M42Value *out = m42_value_list_new ();
+    /* An empty field is "" to Mathematica; csvread makes it 0 and
+     * readmatrix NaN, as MATLAB does. */
+    g_autoptr (M42Value) missing =
+      strcmp (what, "csvread") == 0 ? m42_value_real (0)
+      : strcmp (what, "readmatrix") == 0 ? m42_value_real (NAN)
+      : m42_value_string ("");
+    M42Value *out = csv_table (contents, separator, missing);
 
-    for (guint i = 0; lines[i] != NULL; i++)
-      {
-        M42Value *row;
-
-        g_strchomp (lines[i]);
-        if (lines[i][0] == 0)
-          continue;
-        row = csv_row (lines[i], separator);
-        if (m42_value_list_length (row) == 0)
-          m42_value_unref (row);
-        else
-          m42_value_list_append (out, row);
-      }
     /* A file of one column comes back as a plain list, which is what
      * anyone reading a column of numbers wants. */
     {
@@ -18328,6 +18388,31 @@ export_mat (M42Session *s, const char *path, const M42Value *what,
   return m42_value_string (path);
 }
 
+/* One field of a comma-separated file: a string in double quotes with
+ * any quote in it doubled, as RFC 4180 has it and as Import reads it
+ * back -- it went out with its quotes as they were, so that say "hi"
+ * came back cut in three -- and anything else as math42 prints it. */
+static void
+csv_append (GString *text, const M42Value *v)
+{
+  g_autofree char *printed = NULL;
+
+  if (v->kind == M42_VALUE_STRING)
+    {
+      g_string_append_c (text, '"');
+      for (const char *p = v->u.string; *p != 0; p++)
+        {
+          if (*p == '"')
+            g_string_append_c (text, '"');
+          g_string_append_c (text, *p);
+        }
+      g_string_append_c (text, '"');
+      return;
+    }
+  printed = m42_value_to_string (v);
+  g_string_append (text, printed);
+}
+
 /* A value written to disk: a table as rows of fields, anything else as
  * the text math42 would print. */
 static M42Value *
@@ -18350,18 +18435,12 @@ export_file (const char *path, const M42Value *v, const char *what)
           if (row->kind == M42_VALUE_LIST)
             for (guint j = 0; j < m42_value_list_length (row); j++)
               {
-                g_autofree char *field = m42_value_to_string (m42_value_list_nth (row, j));
-
                 if (j > 0)
                   g_string_append_c (text, separator);
-                g_string_append (text, field);
+                csv_append (text, m42_value_list_nth (row, j));
               }
           else
-            {
-              g_autofree char *field = m42_value_to_string (row);
-
-              g_string_append (text, field);
-            }
+            csv_append (text, row);
           g_string_append_c (text, '\n');
         }
     }
