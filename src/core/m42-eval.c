@@ -12277,7 +12277,7 @@ make_filled (const char *name, GPtrArray *args, double fill, gboolean identity)
 static M42Value *
 range_builtin (const char *name, GPtrArray *args)
 {
-  double lo = 1, hi, step = 1;
+  double lo = 1, hi, step = 1, count;
   M42Value *out;
 
   if (args->len < 1 || args->len > 3)
@@ -12299,12 +12299,17 @@ range_builtin (const char *name, GPtrArray *args)
             step = step > 1 ? (hi - lo) / (step - 1) : hi - lo;
         }
     }
-  if (step == 0 || (hi - lo) / step > 1e6)
+  /* Counted before it starts rather than stepped until it passes the
+   * end: an infinite end is never passed, and neither is one so large
+   * that adding the step leaves it where it was. */
+  count = (hi - lo) / step;
+  if (step == 0 || !isfinite (lo) || !isfinite (count) || count > 1e6)
     return m42_value_error ("%s: range too long", name);
 
   out = m42_value_list_new ();
-  for (double x = lo; step > 0 ? x <= hi + 1e-9 * step : x >= hi - 1e-9 * step; x += step)
-    m42_value_list_append (out, m42_value_number (x));
+  if (count >= -1e-9)
+    for (double x = lo, i = 0; i <= count + 1e-9; i++, x += step)
+      m42_value_list_append (out, m42_value_number (x));
   return out;
 }
 
@@ -15512,9 +15517,15 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       ARG (0)->kind == M42_VALUE_LIST && is_num (ARG (1)))
     {
       guint n = m42_value_list_length (ARG (0));
-      guint k = (guint) MAX (1.0, ARG (1)->u.number);
+      double size = ARG (1)->u.number;
+      guint k;
       M42Value *out = m42_value_list_new ();
 
+      /* Longer than the list is no part at all; cast as it was, 2^63
+       * came out as nothing and the loop never ended. */
+      if (!(size <= n))
+        return out;
+      k = (guint) MAX (1.0, size);
       for (guint i = 0; i + k <= n; i += k)
         {
           M42Value *part = m42_value_list_new ();
