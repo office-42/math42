@@ -922,10 +922,15 @@ polygamma (int order, double x)
 static M42Value *
 exact_fraction (gint64 p, gint64 q)
 {
-  gint64 u = p < 0 ? -p : p, v = q < 0 ? -q : q, g;
+  gint64 u, v, g;
 
   if (q == 0)
     return m42_value_error ("a fraction over nothing");
+  /* -2^63 has no negative; m42_value_rational knows what to do. */
+  if (p == G_MININT64 || q == G_MININT64)
+    return m42_value_rational (p, q);
+  u = p < 0 ? -p : p;
+  v = q < 0 ? -q : q;
   while (v != 0)
     {
       gint64 t = u % v;
@@ -1692,7 +1697,9 @@ exact_op (int op, const M42Value *a, const M42Value *b)
     case M42_TOK_PERCENT:
       if (a->den != 1 || b->den != 1 || b->num == 0)
         return NULL;
-      num = a->num % b->num;
+      /* In __int128, where -2^63 has a remainder by -1 like anything
+       * else; in a gint64 it is a trap. */
+      num = (__int128) a->num % b->num;
       den = 1;
       break;
     case M42_TOK_CARET:
@@ -1935,6 +1942,30 @@ need_number (M42Value *v, const char *who, double *out, M42Value **err)
       *err = is_error (v) ? m42_value_ref (v) : m42_value_error ("%s expects a number", who);
       return FALSE;
     }
+  return TRUE;
+}
+
+/* The whole number a value is, when a gint64 can hold it and its
+ * negative too: an exact one as it stands, and a decimal only while it
+ * is whole and below 2^53, where the double has not yet rounded it.
+ * Infinity, 1.5 and 1e30 are not whole numbers; cast to one they came
+ * out as the -2^63 that, divided by -1, took the program down. */
+static gboolean
+whole_int64 (const M42Value *v, gint64 *out)
+{
+  double x;
+
+  if (v->kind == M42_VALUE_NUMBER && v->exact && v->den == 1)
+    {
+      if (v->num == G_MININT64)
+        return FALSE;
+      *out = v->num;
+      return TRUE;
+    }
+  if (!value_number (v, &x) || !isfinite (x) || x != floor (x) ||
+      fabs (x) > 9007199254740992.0)
+    return FALSE;
+  *out = (gint64) x;
   return TRUE;
 }
 
@@ -13648,32 +13679,51 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
   /* Whole numbers, as a first course in number theory meets them. */
   if ((name_is (name, "GCD", "gcd") || name_is (name, "LCM", "lcm")) && args->len >= 2)
     {
-      g_autoptr (GArray) xs = g_array_new (FALSE, FALSE, sizeof (double));
-      gint64 acc;
+      g_autoptr (GPtrArray) xs = g_ptr_array_new ();
       gboolean want_lcm = name[0] == 'L' || name[0] == 'l';
+      /* The common multiple so far, which outgrows a gint64 soon
+       * enough; the common divisor never grows. */
+      g_autoptr (M42Big) multiple = NULL;
+      gint64 divisor = 0;
 
-      if (!collect_numbers (args, xs) || xs->len == 0)
+      if (!collect_values (args, xs) || xs->len == 0)
         return m42_value_error ("%s expects whole numbers", name);
-      acc = (gint64) g_array_index (xs, double, 0);
-      for (guint i = 1; i < xs->len; i++)
+      for (guint i = 0; i < xs->len; i++)
         {
-          gint64 b = (gint64) g_array_index (xs, double, i), a = acc, t;
-          gint64 g;
+          gint64 b, a, t, rest = 0;
 
-          while (b != 0)
+          if (!whole_int64 (g_ptr_array_index (xs, i), &b))
+            return m42_value_error ("%s expects whole numbers below 2^63", name);
+          b = b < 0 ? -b : b;
+          if (!want_lcm)
             {
-              t = a % b;
-              a = b;
-              b = t;
+              for (a = divisor; b != 0; a = b, b = t)
+                t = a % b;
+              divisor = a;
+              continue;
             }
-          g = a < 0 ? -a : a;
-          if (g == 0)
-            g = 1;
-          acc = want_lcm ? acc / g * (gint64) g_array_index (xs, double, i) : g;
-          if (acc < 0)
-            acc = -acc;
+          if (multiple == NULL || b == 0)
+            {
+              m42_big_free (multiple);
+              multiple = m42_big_from_int64 (b);
+              continue;
+            }
+          if (m42_big_is_zero (multiple))
+            continue;
+          /* Divided by what it shares with b, then multiplied by b. */
+          m42_big_free (m42_big_divide_small (multiple, b, &rest));
+          for (a = b; rest != 0; a = rest, rest = t)
+            t = a % rest;
+          {
+            g_autoptr (M42Big) part = m42_big_divide_small (multiple, a, NULL);
+            g_autoptr (M42Big) factor = m42_big_from_int64 (b);
+
+            m42_big_free (multiple);
+            multiple = m42_big_multiply (part, factor);
+          }
         }
-      return m42_value_number ((double) acc);
+      return want_lcm ? m42_value_bigint (g_steal_pointer (&multiple))
+                      : m42_value_exact_int (divisor);
     }
   /* The Bessel functions and the orthogonal polynomials: an order (or a
    * degree) and an argument. */
@@ -14202,11 +14252,16 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       args->len >= 1 && ARG (0)->kind == M42_VALUE_LIST)
     {
       guint n = m42_value_list_length (ARG (0));
-      int by = args->len == 2 && is_num (ARG (1)) ? (int) ARG (1)->u.number : 1;
-      M42Value *out = m42_value_list_new ();
+      gint64 far = 1;
+      int by;
+      M42Value *out;
 
+      if (args->len == 2 && is_num (ARG (1)) && !whole_int64 (ARG (1), &far))
+        return m42_value_error ("%s wants a whole number of places", name);
+      out = m42_value_list_new ();
       if (n == 0)
         return out;
+      by = (int) (far % (gint64) n);
       if (name[6] == 'R' || name[0] == 'c')
         by = -by;
       for (guint i = 0; i < n; i++)
@@ -14702,21 +14757,17 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
 
   if (name_is (name, "PowerMod", "powermod") && args->len == 3)
     {
-      double base, power, modulus;
-      M42Value *err;
       gint64 acc = 1, b, e, m;
 
-      if (!need_number (ARG (0), name, &base, &err) ||
-          !need_number (ARG (1), name, &power, &err) ||
-          !need_number (ARG (2), name, &modulus, &err))
-        return err;
-      if (modulus < 1 || power < 0 || fabs (base) > 1e15)
+      if (!whole_int64 (ARG (0), &b) || !whole_int64 (ARG (1), &e) ||
+          !whole_int64 (ARG (2), &m) || m < 1 || e < 0)
         return m42_value_error ("%s wants whole numbers, with a positive modulus", name);
 
       /* Squaring as it goes, so that big powers stay small. */
-      m = (gint64) modulus;
-      b = ((gint64) base % m + m) % m;
-      e = (gint64) power;
+      b %= m;
+      if (b < 0)
+        b += m;
+      acc %= m;
       while (e > 0)
         {
           if (e & 1)
@@ -14724,20 +14775,19 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
           b = (__int128) b * b % m;
           e >>= 1;
         }
-      return m42_value_number ((double) acc);
+      return m42_value_exact_int (acc);
     }
 
   if ((name_is (name, "ExtendedGCD", "gcdex") || name_is (name, "ModularInverse", "modinv")) &&
       args->len == 2)
     {
-      double x, y;
-      M42Value *err;
+      gint64 x, y;
       gint64 old_r, r, old_s, s_, old_t, t;
 
-      if (!need_number (ARG (0), name, &x, &err) || !need_number (ARG (1), name, &y, &err))
-        return err;
-      old_r = (gint64) x;
-      r = (gint64) y;
+      if (!whole_int64 (ARG (0), &x) || !whole_int64 (ARG (1), &y))
+        return m42_value_error ("%s expects whole numbers below 2^63", name);
+      old_r = x;
+      r = y;
       old_s = 1; s_ = 0;
       old_t = 0; t = 1;
       while (r != 0)
@@ -14751,20 +14801,28 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
 
       if (name_is (name, "ModularInverse", "modinv"))
         {
-          gint64 m = (gint64) y;
+          gint64 m = y, inverse;
 
+          if (m == 0)
+            return m42_value_error ("%s: there is no inverse modulo nothing", name);
           if (old_r != 1 && old_r != -1)
-            return m42_value_error ("%s: %g and %g have a factor in common", name, x, y);
-          return m42_value_number ((double) (((old_s % m) + m) % m));
+            return m42_value_error ("%s: %" G_GINT64_FORMAT " and %" G_GINT64_FORMAT
+                                    " have a factor in common", name, x, y);
+          /* Between nothing and the modulus, on the modulus's side of
+           * nothing; and the sign that old_r carried taken out. */
+          inverse = (old_r < 0 ? -old_s : old_s) % m;
+          if (inverse != 0 && (inverse < 0) != (m < 0))
+            inverse += m;
+          return m42_value_exact_int (inverse);
         }
       {
         /* {g, {s, t}} with s x + t y = g, as Mathematica gives it. */
         M42Value *out = m42_value_list_new ();
         M42Value *pair = m42_value_list_new ();
 
-        m42_value_list_append (out, m42_value_number ((double) (old_r < 0 ? -old_r : old_r)));
-        m42_value_list_append (pair, m42_value_number ((double) (old_r < 0 ? -old_s : old_s)));
-        m42_value_list_append (pair, m42_value_number ((double) (old_r < 0 ? -old_t : old_t)));
+        m42_value_list_append (out, m42_value_exact_int (old_r < 0 ? -old_r : old_r));
+        m42_value_list_append (pair, m42_value_exact_int (old_r < 0 ? -old_s : old_s));
+        m42_value_list_append (pair, m42_value_exact_int (old_r < 0 ? -old_t : old_t));
         m42_value_list_append (out, pair);
         return out;
       }
@@ -14779,31 +14837,58 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
       if (n != m42_value_list_length (ARG (1)))
         return m42_value_error ("%s wants as many remainders as moduli", name);
       for (guint i = 0; i < n; i++)
-        product *= (gint64) m42_value_list_nth (ARG (1), i)->u.number;
-      if (product <= 0 || product > (gint64) 1e15)
-        return m42_value_error ("%s: those moduli multiply to too much", name);
+        {
+          gint64 m, want;
 
-      /* One step at a time, searching within what is settled so far. */
+          if (!whole_int64 (m42_value_list_nth (ARG (0), i), &want) ||
+              !whole_int64 (m42_value_list_nth (ARG (1), i), &m) || m < 1)
+            return m42_value_error ("%s wants whole remainders and positive whole moduli", name);
+          if (m > (gint64) 1e15 / product)
+            return m42_value_error ("%s: those moduli multiply to too much", name);
+          product *= m;
+        }
+
+      /* One congruence at a time.  x is settled modulo some s, and the
+       * next asks for w modulo m: x + s k is w for the k that makes
+       * (s/g) k come to (w - x)/g modulo m/g, g being what s and m
+       * share, and there is none unless g divides w - x.  Searching
+       * for k one at a time took a thousand million million steps at
+       * the largest modulus it let through. */
       {
         gint64 settled = 1;
 
         for (guint i = 0; i < n; i++)
           {
-            gint64 m = (gint64) m42_value_list_nth (ARG (1), i)->u.number;
-            gint64 want = (gint64) m42_value_list_nth (ARG (0), i)->u.number;
-            gint64 tries = 0;
+            gint64 m, want, g, a, b, t, u = 1, v = 0, w, k;
 
-            want = ((want % m) + m) % m;
-            while (x % m != want)
+            whole_int64 (m42_value_list_nth (ARG (1), i), &m);
+            whole_int64 (m42_value_list_nth (ARG (0), i), &want);
+            want %= m;
+            if (want < 0)
+              want += m;
+
+            /* u (settled / g) = 1 modulo m / g, by Euclid. */
+            for (a = settled, b = m; b != 0; a = b, b = t)
               {
-                x += settled;
-                if (++tries > m)
-                  return m42_value_error ("%s: those congruences cannot all hold", name);
+                gint64 q = a / b;
+
+                t = a - q * b;
+                w = u - q * v;
+                u = v;
+                v = w;
               }
-            settled *= m;
+            g = a;
+            if ((want - x) % g != 0)
+              return m42_value_error ("%s: those congruences cannot all hold", name);
+            k = (gint64) ((__int128) ((want - x) / g) * u % (m / g));
+            if (k < 0)
+              k += m / g;
+            x += settled * k;
+            settled = settled / g * m;
+            x %= settled;
           }
       }
-      return m42_value_number ((double) x);
+      return m42_value_exact_int (x);
     }
 
   /* The counting functions of a discrete mathematics course. */
@@ -14893,14 +14978,12 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
   if (name_is (name, "JacobiSymbol", NULL) && args->len == 2 &&
       is_num (ARG (0)) && is_num (ARG (1)))
     {
-      double da = ARG (0)->u.number, dn = ARG (1)->u.number;
       gint64 a, n;
       int sign = 1;
 
-      if (da != floor (da) || dn != floor (dn) || dn <= 0 || ((gint64) dn) % 2 == 0)
+      if (!whole_int64 (ARG (0), &a) || !whole_int64 (ARG (1), &n) || n <= 0 || n % 2 == 0)
         return m42_value_error ("JacobiSymbol wants a whole number and an odd one above it");
-      n = (gint64) dn;
-      a = ((gint64) da) % n;
+      a %= n;
       if (a < 0)
         a += n;
       while (a != 0)
@@ -16874,14 +16957,16 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
   if (name_is (name, "IntegerString", "dec2base") && args->len >= 1 && is_num (ARG (0)))
     {
       static const char DIGITS[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-      gint64 x = (gint64) ARG (0)->u.number;
-      int base = args->len > 1 && is_num (ARG (1)) ? (int) ARG (1)->u.number : 10;
+      gint64 x, base = 10;
       char buffer[80];
       int at = (int) sizeof buffer - 1;
-      gboolean negative = x < 0;
+      gboolean negative;
 
-      if (base < 2 || base > 36)
+      if (!whole_int64 (ARG (0), &x))
+        return m42_value_error ("IntegerString wants a whole number below 2^63");
+      if ((args->len > 1 && !whole_int64 (ARG (1), &base)) || base < 2 || base > 36)
         return m42_value_error ("IntegerString: the base is between 2 and 36");
+      negative = x < 0;
       buffer[at] = 0;
       if (x == 0)
         buffer[--at] = DIGITS[0];
@@ -16895,25 +16980,33 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
   if (name_is (name, "FromDigits", "base2dec") && args->len >= 1 &&
       ARG (0)->kind == M42_VALUE_STRING)
     {
-      int base = args->len > 1 && is_num (ARG (1)) ? (int) ARG (1)->u.number : 10;
+      gint64 base = 10;
       const char *at = ARG (0)->u.string;
-      gint64 total = 0;
+      /* Kept as a big number throughout: twenty digits outgrow a
+       * gint64, and it used to wrap round to something else. */
+      g_autoptr (M42Big) total = m42_big_from_int64 (0);
+      g_autoptr (M42Big) radix = NULL;
       gboolean negative = *at == '-';
 
-      if (base < 2 || base > 36)
+      if ((args->len > 1 && !whole_int64 (ARG (1), &base)) || base < 2 || base > 36)
         return m42_value_error ("FromDigits: the base is between 2 and 36");
+      radix = m42_big_from_int64 (base);
       if (negative)
         at++;
       for (; *at != 0; at++)
         {
           int digit = g_ascii_isdigit (*at) ? *at - '0'
                     : g_ascii_isalpha (*at) ? g_ascii_tolower (*at) - 'a' + 10 : -1;
+          g_autoptr (M42Big) shifted = NULL;
+          g_autoptr (M42Big) one = m42_big_from_int64 (negative ? -digit : digit);
 
           if (digit < 0 || digit >= base)
-            return m42_value_error ("FromDigits: %c is not a digit in base %d", *at, base);
-          total = total * base + digit;
+            return m42_value_error ("FromDigits: %c is not a digit in base %d", *at, (int) base);
+          shifted = m42_big_multiply (total, radix);
+          m42_big_free (total);
+          total = m42_big_add (shifted, one);
         }
-      return m42_value_number (negative ? -total : total);
+      return m42_value_bigint (g_steal_pointer (&total));
     }
 
   if (name_is (name, "StringSplit", "strsplit") && args->len >= 1 &&
