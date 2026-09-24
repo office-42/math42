@@ -17612,6 +17612,103 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
 
 /* --- indexing --------------------------------------------------------------- */
 
+/* How long a list is at a depth, following first items down: what
+ * MATLAB's end stands for when it indexes that dimension. */
+static guint
+length_at (const M42Value *v, guint depth)
+{
+  for (guint d = 0; d < depth && v->kind == M42_VALUE_LIST && m42_value_list_length (v) > 0; d++)
+    v = m42_value_list_nth ((M42Value *) v, 0);
+  return v->kind == M42_VALUE_LIST ? m42_value_list_length (v) : 1;
+}
+
+/* An index worked out with end standing for the length of the
+ * dimension it indexes, so that v(end - 1), v(2:end) and A(end, :)
+ * mean what they do in MATLAB.  end was understood only standing
+ * alone, and anything done with it -- end - 1, 2:end -- was
+ * arithmetic on a symbol that Part and Range then refused. */
+static M42Value *
+eval_index (M42Session *s, const M42Node *index, const M42Value *target, guint depth)
+{
+  M42Value *v;
+
+  if (target == NULL || !m42_node_depends_on (index, "end"))
+    return eval (s, index);
+  push_scope (s);
+  bind (s, "end", m42_value_number (length_at (target, depth)));
+  v = eval (s, index);
+  pop_scope (s);
+  return v;
+}
+
+/* TRUE for a list of noughts and ones n long: a mask, as v > 25 is. */
+static gboolean
+is_mask (const M42Value *v, guint n)
+{
+  if (!m42_value_is_vector (v) || m42_value_list_length (v) != n)
+    return FALSE;
+  for (guint i = 0; i < n; i++)
+    {
+      const M42Value *x = m42_value_list_nth ((M42Value *) v, i);
+
+      if (!x->exact || x->den != 1 || (x->num != 0 && x->num != 1))
+        return FALSE;
+    }
+  return TRUE;
+}
+
+/* MATLAB's v(i): Part, except that a mask as long as the dimension it
+ * indexes picks out the places where it is one -- v(v > 25) -- and a
+ * matrix of them the size of a matrix picks out its entries where it
+ * is one, down the columns, as MATLAB reads a matrix.  A mask was taken
+ * for a list of places, and place 0 is not one. */
+static M42Value *
+matlab_index (M42Value *v, GPtrArray *indices)
+{
+  g_autoptr (GPtrArray) chosen = g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
+  guint rows, cols, mask_rows, mask_cols;
+
+  if (indices->len == 1 && m42_value_is_matrix (v, &rows, &cols) &&
+      m42_value_is_matrix (g_ptr_array_index (indices, 0), &mask_rows, &mask_cols) &&
+      rows == mask_rows && cols == mask_cols)
+    {
+      M42Value *mask = g_ptr_array_index (indices, 0);
+      M42Value *out;
+      gboolean all = TRUE;
+
+      for (guint i = 0; i < rows && all; i++)
+        all = is_mask (m42_value_list_nth (mask, i), cols);
+      if (all)
+        {
+          out = m42_value_list_new ();
+          for (guint j = 0; j < cols; j++)
+            for (guint i = 0; i < rows; i++)
+              if (m42_value_list_nth (m42_value_list_nth (mask, i), j)->num == 1)
+                m42_value_list_append (out, m42_value_ref (
+                  m42_value_list_nth (m42_value_list_nth (v, i), j)));
+          return out;
+        }
+    }
+  for (guint k = 0; k < indices->len; k++)
+    {
+      M42Value *index = g_ptr_array_index (indices, k);
+      guint n = length_at (v, k);
+
+      if (v->kind == M42_VALUE_LIST && is_mask (index, n))
+        {
+          M42Value *places = m42_value_list_new ();
+
+          for (guint i = 0; i < n; i++)
+            if (m42_value_list_nth (index, i)->num == 1)
+              m42_value_list_append (places, m42_value_number (i + 1));
+          g_ptr_array_add (chosen, places);
+        }
+      else
+        g_ptr_array_add (chosen, m42_value_ref (index));
+    }
+  return index_value (v, chosen, 0);
+}
+
 /* A symbol standing on its own, by name: All, end, or a Span. */
 static gboolean
 symbol_is (const M42Value *v, const char *name)
@@ -17844,7 +17941,8 @@ assign_part (M42Session *s, const char *name, const M42Node *lhs, guint first,
     return m42_value_error ("%s has nothing in it to change", name);
   for (guint i = first; i < lhs->children->len; i++)
     {
-      M42Value *where = eval (s, m42_node_child (lhs, i));
+      /* v(end + 1) = x is how MATLAB adds to the end. */
+      M42Value *where = eval_index (s, m42_node_child (lhs, i), old, i - first);
 
       if (is_error (where))
         {
@@ -18844,16 +18942,24 @@ eval_call (M42Session *s, const M42Node *n)
   }
 
   args = g_ptr_array_new_with_free_func ((GDestroyNotify) m42_value_unref);
-  for (guint i = 0; i < n->children->len; i++)
-    {
-      M42Value *v = eval (s, m42_node_child (n, i));
-      if (is_error (v))
-        {
-          g_ptr_array_unref (args);
-          return v;
-        }
-      g_ptr_array_add (args, v);
-    }
+  {
+    /* A name holding a list is being indexed, MATLAB's way, and end in
+     * an index is the length of what it indexes. */
+    M42Value *indexed = lookup (s, name);
+
+    if (indexed != NULL && indexed->kind != M42_VALUE_LIST)
+      indexed = NULL;
+    for (guint i = 0; i < n->children->len; i++)
+      {
+        M42Value *v = eval_index (s, m42_node_child (n, i), indexed, i);
+        if (is_error (v))
+          {
+            g_ptr_array_unref (args);
+            return v;
+          }
+        g_ptr_array_add (args, v);
+      }
+  }
 
   {
     gboolean matched = FALSE;
@@ -18886,7 +18992,7 @@ eval_call (M42Session *s, const M42Node *n)
   if (fv != NULL && fv->kind == M42_VALUE_FUNC)
     r = apply_function (s, fv, args);
   else if (fv != NULL && fv->kind == M42_VALUE_LIST)
-    r = index_value (fv, args, 0);              /* MATLAB: x(2) */
+    r = matlab_index (fv, args);                /* MATLAB: x(2) */
   else if (name_is (name, "ListPlot", "scatter"))
     r = list_plot_with_options (args, M42_SERIES_POINTS, FALSE);
   else if (name_is (name, "ListLinePlot", NULL))
@@ -19057,7 +19163,7 @@ eval (M42Session *s, const M42Node *n)
             return g_steal_pointer (&target);
           }
         for (guint i = 1; i < n->children->len; i++)
-          g_ptr_array_add (idx, eval (s, m42_node_child (n, i)));
+          g_ptr_array_add (idx, eval_index (s, m42_node_child (n, i), target, i - 1));
         r = index_value (target, idx, 0);
         g_ptr_array_unref (idx);
         return r;
