@@ -1582,6 +1582,13 @@ map1_full (M42Value *a, const char *canon, double (*fn) (double), gboolean exact
           if (known != NULL)
             return known;
         }
+      /* A decimal in, a decimal out -- Exp[0.0] is 1.0, not 1 -- save
+       * for the functions whose answer is a whole number whatever they
+       * are given, as Floor[2.5] is 2 in Mathematica too. */
+      if (!a->exact && strcmp (canon, "Floor") != 0 && strcmp (canon, "Ceiling") != 0 &&
+          strcmp (canon, "Round") != 0 && strcmp (canon, "Sign") != 0 &&
+          strcmp (canon, "Not") != 0)
+        return m42_value_real (fn (a->u.number));
       return m42_value_number (fn (a->u.number));
     }
 
@@ -1660,6 +1667,21 @@ apply_op (int op, double a, double b)
     case M42_TOK_OR:      return a != 0 || b != 0;
     default:              return NAN;
     }
+}
+
+/* The answer the doubles gave.  With a decimal on either side it is a
+ * decimal too, whole or not -- 0.5 + 0.5 is 1.0, and 1.0/3 is 0.333333
+ * rather than a third -- but a comparison is True or False all the
+ * same. */
+static M42Value *
+double_result (int op, double x, const M42Value *a, const M42Value *b)
+{
+  gboolean arithmetic = op == M42_TOK_PLUS || op == M42_TOK_MINUS || op == M42_TOK_STAR ||
+                        op == M42_TOK_SLASH || op == M42_TOK_PERCENT || op == M42_TOK_CARET;
+
+  if (arithmetic && (!a->exact || !b->exact))
+    return m42_value_real (x);
+  return m42_value_number (x);
 }
 
 /* Exact arithmetic on fractions, in the width of a gint64 with the
@@ -1831,7 +1853,7 @@ map2 (int op, M42Value *a, M42Value *b)
                                                  : as_double (b);
 
           if (isfinite (x) && isfinite (y))
-            return m42_value_number (apply_op (op, x, y));
+            return double_result (op, apply_op (op, x, y), a, b);
         }
     }
 
@@ -1857,7 +1879,7 @@ map2 (int op, M42Value *a, M42Value *b)
       if (op == M42_TOK_CARET && a->u.number < 0 &&
           b->u.number != floor (b->u.number) && isfinite (b->u.number))
         return from_complex (cpow (a->u.number, b->u.number));
-      return m42_value_number (apply_op (op, a->u.number, b->u.number));
+      return double_result (op, apply_op (op, a->u.number, b->u.number), a, b);
     }
 
   /* Complex numbers, which C knows how to add and multiply.  A
@@ -12286,13 +12308,17 @@ static M42Value *
 range_builtin (const char *name, GPtrArray *args)
 {
   double lo = 1, hi, step = 1, count;
+  gboolean decimal = FALSE;
   M42Value *out;
 
   if (args->len < 1 || args->len > 3)
     return m42_value_error ("%s takes one to three arguments", name);
   for (guint i = 0; i < args->len; i++)
-    if (!is_num (ARG (i)))
-      return m42_value_error ("%s expects numbers", name);
+    {
+      if (!is_num (ARG (i)))
+        return m42_value_error ("%s expects numbers", name);
+      decimal |= !ARG (i)->exact;
+    }
 
   if (args->len == 1)
     hi = ARG (0)->u.number;
@@ -12315,9 +12341,11 @@ range_builtin (const char *name, GPtrArray *args)
     return m42_value_error ("%s: range too long", name);
 
   out = m42_value_list_new ();
+  /* Decimals in, decimals out, as with arithmetic: Range[0, 2, 0.5]
+   * has 1.0 in it, not 1. */
   if (count >= -1e-9)
     for (double x = lo, i = 0; i <= count + 1e-9; i++, x += step)
-      m42_value_list_append (out, m42_value_number (x));
+      m42_value_list_append (out, decimal ? m42_value_real (x) : m42_value_number (x));
   return out;
 }
 
@@ -18524,6 +18552,9 @@ eval (M42Session *s, const M42Node *n)
           if (big != NULL)
             return m42_value_bigint (big);
         }
+      /* 1.0 is the decimal it was written as, whole or not. */
+      if (n->op != 0)
+        return m42_value_real (n->number);
       return m42_value_number (n->number);
 
     case M42_NODE_STRING:

@@ -490,6 +490,7 @@ parse_primary (Parser *p)
 
     case M42_TOK_NUMBER:
       n = m42_node_number (p->tok.number);
+      n->op = p->tok.inexact;
       /* The digits as written, when there were too many for a double. */
       if (p->tok.text != NULL)
         n->name = g_strdup (p->tok.text);

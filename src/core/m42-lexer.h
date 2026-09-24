@@ -46,6 +46,7 @@ typedef struct {
   char        *text;     /* IDENT, STRING and ERROR; owned */
   int          offset;   /* where in the source it starts */
   gboolean     space_before;  /* whitespace preceded it: [1 -2] is two elements */
+  gboolean     inexact;  /* a NUMBER written with a point or an exponent: 1.0, 2e3 */
 } M42Token;
 
 typedef struct {

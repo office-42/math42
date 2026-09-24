@@ -11,7 +11,8 @@
 G_BEGIN_DECLS
 
 typedef enum {
-  M42_NODE_NUMBER,    /* 3.5 */
+  M42_NODE_NUMBER,    /* 3.5 -- op is 1 when it was written as a decimal,
+                         1.0 or 2e3, and so stands for an inexact number */
   M42_NODE_STRING,    /* "a string": the text is in name */
   M42_NODE_IDENT,     /* x, Pi */
   M42_NODE_UNARY,     /* -a, a!, !a, a' (op says which) */

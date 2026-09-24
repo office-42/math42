@@ -26,7 +26,7 @@ m42_token_clear (M42Token *tok)
 static M42Token
 simple (M42TokenKind kind, int offset)
 {
-  M42Token t = { kind, 0.0, NULL, offset, FALSE };
+  M42Token t = { kind, 0.0, NULL, offset, FALSE, FALSE };
   return t;
 }
 
@@ -99,6 +99,12 @@ m42_lexer_next (M42Lexer *lx)
         if (digits > 15 && (gsize) (end - (s + start)) == digits)
           t.text = g_strndup (s + start, digits);
       }
+      /* 1.0 and 1e3 are decimals, whole or not, and stay inexact as
+       * they do in Mathematica: 1.0/3 is 0.333333, not 1/3.  (0x1e is
+       * a whole number that happens to have an e in it.) */
+      if (!(s[start] == '0' && (s[start + 1] == 'x' || s[start + 1] == 'X')))
+        for (const char *at = s + start; at < end && !t.inexact; at++)
+          t.inexact = *at == '.' || *at == 'e' || *at == 'E';
       /* g_ascii_strtod would eat "inf"/"nan" -- those are names here --
        * and a bare "e" after digits that is not an exponent. */
       lx->pos = (int) (end - s);
