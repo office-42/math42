@@ -1571,8 +1571,10 @@ map1_full (M42Value *a, const char *canon, double (*fn) (double), gboolean exact
         return m42_value_real (fn (a->u.number));
 
       /* An exact number in, an exact number out where there is one:
-       * Abs[-3/4] is 3/4 rather than 0.75. */
-      if (a->exact)
+       * Abs[-3/4] is 3/4 rather than 0.75.  Infinity counts, as it does
+       * in Mathematica: ArcTan[Infinity] is Pi/2 and Erf[Infinity] 1,
+       * which is what lets an integral out to it come out exactly. */
+      if (a->exact || isinf (a->u.number))
         {
           M42Value *known = gives_an_angle (canon) ? exact_angle (fn (a->u.number))
                                                    : NULL;
@@ -1585,7 +1587,8 @@ map1_full (M42Value *a, const char *canon, double (*fn) (double), gboolean exact
       /* A decimal in, a decimal out -- Exp[0.0] is 1.0, not 1 -- save
        * for the functions whose answer is a whole number whatever they
        * are given, as Floor[2.5] is 2 in Mathematica too. */
-      if (!a->exact && strcmp (canon, "Floor") != 0 && strcmp (canon, "Ceiling") != 0 &&
+      if (!a->exact && !isinf (a->u.number) &&
+          strcmp (canon, "Floor") != 0 && strcmp (canon, "Ceiling") != 0 &&
           strcmp (canon, "Round") != 0 && strcmp (canon, "Sign") != 0 &&
           strcmp (canon, "Not") != 0)
         return m42_value_real (fn (a->u.number));
@@ -2581,6 +2584,19 @@ differentiate (M42Session *s, const M42Node *call)
   return expr_result (tree);
 }
 
+/* A number the quadrature arrived at: a decimal, since that is all it
+ * can be, with the noise in its last places taken off when it lands
+ * that close to a whole number -- close as a share of itself, so that
+ * a small answer is never taken for nothing, as 10^-9 Exp[-x^2] from
+ * nothing to one was. */
+static M42Value *
+quadrature_result (double x)
+{
+  if (isfinite (x) && x != 0 && fabs (x - round (x)) <= 1e-9 * fabs (x))
+    x = round (x);
+  return m42_value_real (x);
+}
+
 /* Composite Simpson: what NIntegrate always does, and what Integrate
  * falls back on when it has no antiderivative.  It hands back the sum
  * on n panels, and through coarse the sum on n/2 of them, which is
@@ -2645,9 +2661,9 @@ simpson (M42Session *s, const M42Node *f, const char *var, double a, double b)
       double better = simpson_refined (s, f, var, a, b, 0);
 
       if (isfinite (better))
-        return m42_value_number (better);
+        return m42_value_real (better);
     }
-  return m42_value_number (fine);
+  return m42_value_real (fine);
 }
 
 /* An antiderivative at one end of the range.  At infinity there is
@@ -2704,6 +2720,7 @@ simpson_to_infinity (M42Session *s, const M42Node *f, const char *var,
   double h = edge / n;
   double total = 0;
   double near_max = 0, far_max = 0;
+  int numbers = 0;
 
   for (int i = 0; i <= n; i++)
     {
@@ -2713,8 +2730,12 @@ simpson_to_infinity (M42Session *s, const M42Node *f, const char *var,
       double y = number_at (s, f, var, x) * weight;
       int rule = (i == 0 || i == n) ? 1 : (i % 2 == 1 ? 4 : 2);
 
-      if (!isfinite (y))
+      if (isnan (y))
         y = 0;               /* past where the function has anything left */
+      else
+        numbers++;
+      if (!isfinite (y))
+        y = 0;
       total += rule * y;
       if (i <= n / 2)
         near_max = MAX (near_max, fabs (y));
@@ -2729,7 +2750,12 @@ simpson_to_infinity (M42Session *s, const M42Node *f, const char *var,
    * is worse than no answer.  So there is none. */
   if (far_max > 1e3 * MAX (near_max, 1e-300))
     return NULL;
-  return m42_value_number (direction * total * h / 3);
+  /* Hardly anything came back as a number: a symbol in the function,
+   * as a is in Exp[-a x], and the sum was of the noughts put in for
+   * what did not.  It was answering 0.0001666666665. */
+  if (numbers < n / 2)
+    return NULL;
+  return m42_value_real (direction * total * h / 3);
 }
 
 /* An integral whose function has no value at one of the ends.
@@ -2804,10 +2830,7 @@ tanh_sinh (M42Session *s, const M42Node *f, const char *var, double a, double b)
    * lie. */
   if (used < steps || !isfinite (total))
     return NULL;
-  /* An answer this close to a simple number is that number. */
-  if (fabs (total - round (total)) < 1e-9 * MAX (1.0, fabs (total)))
-    total = round (total);
-  return m42_value_number (total);
+  return quadrature_result (total);
 }
 
 /* The expression a call was given, with the variables that hold values
@@ -2827,6 +2850,100 @@ symbolic_argument (M42Session *s, const M42Node *raw, const char *var)
   return tree != NULL ? tree : m42_node_copy (raw);
 }
 
+/* TRUE when a tree has a number in it that was a decimal: written with
+ * a point, or not whole, since an exact fraction in a tree is a
+ * quotient of whole numbers.  An infinity counts, and so does
+ * Indeterminate: 1/a - Exp[-Infinity a]/a is not an answer. */
+static gboolean
+has_decimal (const M42Node *n)
+{
+  if (n->kind == M42_NODE_NUMBER)
+    return n->op != 0 || n->number != floor (n->number) || !isfinite (n->number);
+  if (n->kind == M42_NODE_IDENT &&
+      (strcmp (n->name, "Infinity") == 0 || strcmp (n->name, "Indeterminate") == 0 ||
+       strcmp (n->name, "ComplexInfinity") == 0))
+    return TRUE;
+  for (guint i = 0; i < n->children->len; i++)
+    if (has_decimal (m42_node_child (n, i)))
+      return TRUE;
+  return FALSE;
+}
+
+/* TRUE when a tree has a symbol in it that stands for nothing known --
+ * a parameter, or the outer variable of an integral inside another --
+ * rather than Pi or E. */
+static gboolean
+has_free_symbol (const M42Node *n)
+{
+  if (n->kind == M42_NODE_IDENT)
+    return isnan (constant_number (n->name)) && strcmp (n->name, "I") != 0 &&
+           strcmp (n->name, "Infinity") != 0;
+  for (guint i = 0; i < n->children->len; i++)
+    if (has_free_symbol (m42_node_child (n, i)))
+      return TRUE;
+  return FALSE;
+}
+
+/* A bound that can go into an antiderivative as it stands: a whole
+ * number or a fraction, Pi/2, Log[2], an infinity, or a symbol -- not
+ * 0.5 or 1.5 Pi, which make the answer a decimal. */
+static gboolean
+bound_is_exact (const M42Value *v)
+{
+  if (v->kind == M42_VALUE_BIGINT)
+    return TRUE;
+  if (v->kind == M42_VALUE_NUMBER)
+    return v->exact || isinf (v->u.number);
+  return v->kind == M42_VALUE_EXPR && !has_decimal (v->u.expr);
+}
+
+/* F(b) - F(a) worked out the way the rest of math42 works things out,
+ * with the bounds put in as they are rather than as doubles: x^3/3
+ * from nothing to one is 1/3, and x/2 - Sin[2 x]/4 over [0, Pi] is
+ * Pi/2 because Sin[2 Pi] is exactly nothing.  Another symbol in the
+ * integrand stays in the answer: x y^2 over y from 0 to 3 is 9 x.
+ * NULL when either end does not come out, or when what comes out is
+ * not exact all through: Erf[1] is a decimal, and 0.42 Sqrt[Pi] is
+ * neither one thing nor the other. */
+static M42Value *
+exact_definite (M42Session *s, const M42Node *anti, const char *var,
+                const M42Value *lo, const M42Value *hi)
+{
+  g_autoptr (M42Node) lo_node = value_to_node (lo);
+  g_autoptr (M42Node) hi_node = value_to_node (hi);
+  g_autoptr (M42Node) at_lo = NULL;
+  g_autoptr (M42Node) at_hi = NULL;
+  g_autoptr (M42Value) bottom = NULL;
+  g_autoptr (M42Value) top = NULL;
+  M42Value *difference;
+
+  if (lo_node == NULL || hi_node == NULL)
+    return NULL;
+  at_lo = m42_node_substitute (anti, var, lo_node);
+  at_hi = m42_node_substitute (anti, var, hi_node);
+  if (at_lo == NULL || at_hi == NULL)
+    return NULL;
+  bottom = eval (s, at_lo);
+  top = eval (s, at_hi);
+  if ((!numberish (bottom) && bottom->kind != M42_VALUE_EXPR) ||
+      (!numberish (top) && top->kind != M42_VALUE_EXPR))
+    return NULL;
+  difference = map2 (M42_TOK_MINUS, top, bottom);
+  if (difference->kind == M42_VALUE_EXPR)
+    {
+      M42Node *simpler = simplify_hard (s, difference->u.expr);
+
+      m42_value_unref (difference);
+      difference = expr_result (simpler);
+    }
+  if ((!numberish (difference) && difference->kind != M42_VALUE_EXPR) ||
+      (difference->kind == M42_VALUE_NUMBER && !difference->exact) ||
+      (difference->kind == M42_VALUE_EXPR &&
+       (has_decimal (difference->u.expr) || m42_node_depends_on (difference->u.expr, var))))
+    g_clear_pointer (&difference, m42_value_unref);
+  return difference;
+}
+
 /* Integrate[f, x] is the antiderivative; Integrate[f, {x, a, b}] is
  * F(b) - F(a) when there is one, and Simpson when there is not.
  * NIntegrate is always Simpson. */
@@ -2839,6 +2956,10 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
   M42Value *err;
   g_autoptr (M42Node) integrand = NULL;
   g_autoptr (M42Node) anti = NULL;
+  g_autoptr (M42Value) va = NULL;
+  g_autoptr (M42Value) vb = NULL;
+  g_autoptr (M42Value) exact = NULL;
+  double exact_x = NAN;
 
   if (call->children->len != 2)
     return m42_value_error ("%s expects an expression and a variable or {x, a, b}",
@@ -2869,17 +2990,28 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
       m42_node_child (spec, 0)->kind != M42_NODE_IDENT)
     return m42_value_error ("Integrate expects a variable, or {x, a, b} between bounds");
   var = m42_node_child (spec, 0)->name;
+  va = eval (s, m42_node_child (spec, 1));
+  vb = eval (s, m42_node_child (spec, 2));
   {
-    g_autoptr (M42Value) va = eval (s, m42_node_child (spec, 1));
-    g_autoptr (M42Value) vb = eval (s, m42_node_child (spec, 2));
-
     if (!need_number (va, "Integrate", &a, &err) || !need_number (vb, "Integrate", &b, &err))
       {
-        /* Bounds that are not numbers leave the integral as it was
-         * written, which the page sets with its sign and its limits. */
-        M42Node *unevaluated = m42_node_new (M42_NODE_CALL);
+        /* Bounds that are not numbers -- y from 0 to x, inside an
+         * integral over x -- are put into the antiderivative as they
+         * are, when there is one; otherwise the integral is left as it
+         * was written, which the page sets with its sign and its
+         * limits. */
+        M42Node *unevaluated;
 
         m42_value_unref (err);
+        if (!numeric_only && bound_is_exact (va) && bound_is_exact (vb))
+          {
+            integrand = symbolic_argument (s, m42_node_child (call, 0), var);
+            anti = m42_node_integrate (integrand, var);
+            exact = anti != NULL ? exact_definite (s, anti, var, va, vb) : NULL;
+            if (exact != NULL)
+              return g_steal_pointer (&exact);
+          }
+        unevaluated = m42_node_new (M42_NODE_CALL);
         unevaluated->name = g_strdup (numeric_only ? "NIntegrate" : "Integrate");
         g_ptr_array_add (unevaluated->children,
                          symbolic_argument (s, m42_node_child (call, 0), var));
@@ -2900,15 +3032,36 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
        * be asked about -- there is still the numeric way below. */
       double fa, fb;
 
+      /* With exact bounds, exactly: 1/3 and Pi/2, where the doubles
+       * gave 0.333333333333333 and 1.5707963267949, and where rounding
+       * to the nearest whole number to make them look exact turned
+       * 10^-10 x^2 from nothing to one into nothing.  The exact answer
+       * is kept only if it agrees with the doubles, in case the
+       * simplifying has gone wrong somewhere along the way. */
+      if (bound_is_exact (va) && bound_is_exact (vb))
+        {
+          exact = exact_definite (s, anti, var, va, vb);
+          /* Not a number because another symbol is in it -- the outer
+           * variable of an integral inside another, or a parameter --
+           * and then the doubles have nothing to say: they answered
+           * Indeterminate for a x from nothing to one, which is a/2.
+           * Anything else that is not a number cannot be checked, and
+           * is not trusted. */
+          if (exact != NULL && !value_number (exact, &exact_x) &&
+              exact->kind == M42_VALUE_EXPR && has_free_symbol (exact->u.expr))
+            return g_steal_pointer (&exact);
+          if (exact != NULL && !isfinite (exact_x))
+            g_clear_pointer (&exact, m42_value_unref);
+        }
       if (antiderivative_at (s, anti, var, a, &fa) &&
           antiderivative_at (s, anti, var, b, &fb))
         {
           double x = fb - fa;
 
-          /* Exact answers should look exact: 9, not 8.999999999999998. */
-          if (fabs (x - round (x)) < 1e-9 * MAX (1.0, fabs (x)))
-            x = round (x);
-          return m42_value_number (x);
+          if (exact != NULL &&
+              fabs (exact_x - x) <= 1e-9 * MAX (fabs (fa) + fabs (fb), fabs (x)))
+            return g_steal_pointer (&exact);
+          return m42_value_real (x);
         }
     }
 
@@ -2927,7 +3080,7 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
           double x;
 
           if (value_number (half, &x))
-            answer = m42_value_number (-x);
+            answer = m42_value_real (-x);
         }
       else if (isinf (a) && isinf (b) && a < b)
         {
@@ -2938,19 +3091,21 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
           double x, y;
 
           if (value_number (down, &x) && value_number (up, &y))
-            answer = m42_value_number (y - x);
+            answer = m42_value_real (y - x);
         }
 
       if (answer != NULL && is_num (answer) && isfinite (answer->u.number))
         {
           double x = answer->u.number;
 
-          if (fabs (x - round (x)) < 1e-7 * MAX (1.0, fabs (x)))
-            {
-              m42_value_unref (answer);
-              return m42_value_number (round (x));
-            }
-          return answer;
+          /* The antiderivative could not be asked at infinity by
+           * walking out to it, but put in as Infinity it answered:
+           * ArcTan[x] over the whole line is Pi.  That is kept if the
+           * quadrature, good to about eight figures here, agrees. */
+          m42_value_unref (answer);
+          if (exact != NULL && fabs (exact_x - x) <= 1e-7 * MAX (fabs (x), 1e-300))
+            return g_steal_pointer (&exact);
+          return quadrature_result (x);
         }
       g_clear_pointer (&answer, m42_value_unref);
 
@@ -2987,26 +3142,15 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
           }
       }
 
-    /* Quadrature this good landing a whisker from a simple number
-     * means the number, not the whisker. */
+    /* A decimal, whatever it lands near: it was taken for a whole
+     * number within 10^-9 of one, which made 10^-9 Exp[-x^2] from
+     * nothing to one nothing, and for a fraction with a bottom up to
+     * 24, which made NIntegrate[x^2, {x, 0, 1}] the exact 1/3. */
     if (is_num (numeric) && isfinite (numeric->u.number))
       {
         x = numeric->u.number;
-        if (fabs (x - round (x)) < 1e-9 * MAX (1.0, fabs (x)))
-          {
-            m42_value_unref (numeric);
-            return m42_value_number (round (x));
-          }
-        for (int den = 2; den <= 24; den++)
-          {
-            double scaled = x * den;
-
-            if (fabs (scaled - round (scaled)) < 1e-9 * MAX (1.0, fabs (scaled)))
-              {
-                m42_value_unref (numeric);
-                return m42_value_rational ((gint64) round (scaled), den);
-              }
-          }
+        m42_value_unref (numeric);
+        return quadrature_result (x);
       }
     return numeric;
   }
@@ -3033,7 +3177,7 @@ integral_matlab (M42Session *s, const M42Node *call)
         number_at (s, m42_node_child (call, 0), "x", b);
   for (int i = 1; i < n; i++)
     sum += (i % 2 == 1 ? 4 : 2) * number_at (s, m42_node_child (call, 0), "x", a + i * h);
-  return m42_value_number (sum * h / 3);
+  return quadrature_result (sum * h / 3);
 }
 
 /* A number as a series coefficient is written the way it would be by
@@ -18206,7 +18350,11 @@ eval_call (M42Session *s, const M42Node *n)
       n->children->len > 2)
     {
       /* Integrate[f, {x, a, b}, {y, c, d}]: the inner integral first,
-       * then the outer one over what it gives, as it is done by hand. */
+       * then the outer one over what it gives, as it is done by hand.
+       * The last is the innermost and the first the outermost, so the
+       * ones between are wrapped round it from the last back; taken
+       * the other way, a third variable came outside the first, and
+       * {y, 0, x} was asked for with no x to go to. */
       M42Node *inner = m42_node_new (M42_NODE_CALL);
       M42Value *iterated;
 
@@ -18214,7 +18362,7 @@ eval_call (M42Session *s, const M42Node *n)
       g_ptr_array_add (inner->children, m42_node_copy (m42_node_child (n, 0)));
       g_ptr_array_add (inner->children,
                        m42_node_copy (m42_node_child (n, n->children->len - 1)));
-      for (guint i = 1; i + 1 < n->children->len; i++)
+      for (guint i = n->children->len - 2; i >= 1; i--)
         {
           M42Node *outer = m42_node_new (M42_NODE_CALL);
 
