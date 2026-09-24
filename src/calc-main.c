@@ -11,6 +11,9 @@
  * Given a file to run instead, it reads that -- a .m42 notebook, a
  * MATLAB .m script, a Wolfram .wl one or a Mathematica .nb notebook,
  * whichever the name says.
+ *
+ * It exits with 1 when the file cannot be read, and with 2 when GLib
+ * logged a warning or a critical along the way, whatever was printed.
  */
 
 #include "m42-eval.h"
@@ -27,6 +30,22 @@
 #include <io.h>
 #define INTERACTIVE() _isatty (0)
 #endif
+
+/* How many warnings and criticals GLib has logged.  None of them is
+ * ever meant: a g_return_if_fail tripping inside the engine is a bug,
+ * and the answer may still print as if nothing had happened.  They go
+ * to stderr as always, and the exit status says so too, which is what
+ * lets a script -- CI's smoke test, or a sweep -- notice. */
+static guint complaints = 0;
+
+static GLogWriterOutput
+count_complaints (GLogLevelFlags level, const GLogField *fields, gsize n_fields,
+                  gpointer user_data)
+{
+  if (level & (G_LOG_LEVEL_CRITICAL | G_LOG_LEVEL_WARNING))
+    complaints++;
+  return g_log_writer_default (level, fields, n_fields, user_data);
+}
 
 /* One line worked out and its answer printed, as both ways in do it. */
 static void
@@ -71,8 +90,11 @@ read_line (FILE *in)
 int
 main (int argc, char *argv[])
 {
-  g_autoptr (M42Session) session = m42_session_new ();
+  g_autoptr (M42Session) session = NULL;
   gboolean interactive = INTERACTIVE ();
+
+  g_log_set_writer_func (count_complaints, NULL, NULL);
+  session = m42_session_new ();
 
   if (argc > 1 && (strcmp (argv[1], "--version") == 0 || strcmp (argv[1], "-v") == 0))
     {
@@ -101,7 +123,7 @@ main (int argc, char *argv[])
           if (lines[i][0] != '\0')
             run_line (session, lines[i], m42_session_next_line (session));
         }
-      return 0;
+      return complaints == 0 ? 0 : 2;
     }
 
   if (interactive)
@@ -129,5 +151,5 @@ main (int argc, char *argv[])
 
   if (interactive)
     printf ("\n");
-  return 0;
+  return complaints == 0 ? 0 : 2;
 }

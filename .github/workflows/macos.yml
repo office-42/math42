@@ -49,6 +49,9 @@ jobs:
 
       - name: Smoke test
         run: |
+          # math42-calc exits non-zero when GLib complained, which a
+          # pipe into tee would otherwise hide.
+          set -o pipefail
           printf 'x = {1, 2, 3}\nTotal[x^2] + sqrt(16)\n' \
             | ./builddir/src/math42-calc | tee out.txt
           grep -q 'Out\[2\]= 18' out.txt
