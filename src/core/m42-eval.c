@@ -12558,6 +12558,82 @@ flatten_into (M42Value *v, M42Value *out)
     m42_value_list_append (out, m42_value_ref (v));
 }
 
+/* A square matrix of at most four rows with a symbol in it somewhere,
+ * whose determinant is worth writing out: Det[{{a, b}, {c, d}}] is
+ * a d - b c.  Past four, the twenty-four terms of a 4x4 become a
+ * hundred and twenty, which nobody wants to read. */
+static gboolean
+square_of_symbols (const M42Value *m, guint largest)
+{
+  guint n;
+  gboolean symbolic = FALSE;
+
+  if (m->kind != M42_VALUE_LIST || (n = m42_value_list_length (m)) == 0 || n > largest ||
+      m42_value_is_matrix (m, NULL, NULL))
+    return FALSE;
+  for (guint i = 0; i < n; i++)
+    {
+      M42Value *row = m42_value_list_nth ((M42Value *) m, i);
+
+      if (row->kind != M42_VALUE_LIST || m42_value_list_length (row) != n)
+        return FALSE;
+      for (guint j = 0; j < n; j++)
+        {
+          M42Value *x = m42_value_list_nth (row, j);
+
+          if (x->kind == M42_VALUE_EXPR)
+            symbolic = TRUE;
+          else if (x->kind != M42_VALUE_NUMBER && x->kind != M42_VALUE_COMPLEX &&
+                   x->kind != M42_VALUE_BIGINT)
+            return FALSE;
+        }
+    }
+  return symbolic;
+}
+
+/* The determinant by expanding along the first row, each entry times
+ * the determinant of what is left without its row and column, the
+ * signs taking turns. */
+static M42Value *
+cofactor_det (const M42Value *m)
+{
+  guint n = m42_value_list_length (m);
+  M42Value *total = NULL;
+
+  if (n == 1)
+    return m42_value_ref (m42_value_list_nth (m42_value_list_nth ((M42Value *) m, 0), 0));
+  for (guint j = 0; j < n; j++)
+    {
+      g_autoptr (M42Value) minor = m42_value_list_new ();
+      g_autoptr (M42Value) rest = NULL;
+      g_autoptr (M42Value) term = NULL;
+      M42Value *first = m42_value_list_nth ((M42Value *) m, 0);
+
+      for (guint i = 1; i < n; i++)
+        {
+          M42Value *row = m42_value_list_nth ((M42Value *) m, i);
+          M42Value *shorter = m42_value_list_new ();
+
+          for (guint k = 0; k < n; k++)
+            if (k != j)
+              m42_value_list_append (shorter, m42_value_ref (m42_value_list_nth (row, k)));
+          m42_value_list_append (minor, shorter);
+        }
+      rest = cofactor_det (minor);
+      term = map2 (M42_TOK_STAR, m42_value_list_nth (first, j), rest);
+      if (total == NULL)
+        total = g_steal_pointer (&term);
+      else
+        {
+          M42Value *sum = map2 (j % 2 == 0 ? M42_TOK_PLUS : M42_TOK_MINUS, total, term);
+
+          m42_value_unref (total);
+          total = sum;
+        }
+    }
+  return total;
+}
+
 static gboolean
 name_is (const char *name, const char *a, const char *b)
 {
@@ -12901,6 +12977,23 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
     }
   /* Exact on exact numbers under Mathematica's names, and decimals
    * under MATLAB's, as everywhere else. */
+  if (name_is (name, "Det", "det") && args->len == 1 && square_of_symbols (ARG (0), 4))
+    {
+      M42Value *det = cofactor_det (ARG (0));
+
+      /* Multiplied out and tidied: Sin[t]^2 + Cos[t]^2 is 1. */
+      if (det->kind == M42_VALUE_EXPR)
+        {
+          g_autoptr (M42Node) expanded = m42_node_expand (det->u.expr);
+          M42Node *simpler = simplify_hard (s, expanded);
+
+          m42_value_unref (det);
+          return expr_result (simpler);
+        }
+      return det;
+    }
+  if (name_is (name, "Det", "det") && args->len == 1 && square_of_symbols (ARG (0), G_MAXUINT))
+    return m42_value_error ("%s: a matrix with symbols in it is expanded up to four rows", name);
   if (name_is (name, "Det", "det") && args->len == 1)
     return m42_value_det (ARG (0), !g_ascii_isupper (name[0]));
   if (name_is (name, "Inverse", "inv") && args->len == 1)

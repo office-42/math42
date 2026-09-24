@@ -793,7 +793,7 @@ In[n]:= fft({1, 2, 3, 4})                     Out[n]= {10, -2 + 2 I, -2, -2 - 2 
 | | |
 |---|---|
 | `Det`, `Inverse`, `Transpose` (`A'`) | the usual three; `Transpose` turns any list of lists, names and strings included |
-| | a matrix of whole numbers and fractions, up to about forty by forty, is reduced exactly: `Inverse[{{1, 2}, {3, 4}}]` is `{{-2, 1}, {3/2, -1/2}}`, and `Det`, `LinearSolve`, `RowReduce`, `NullSpace` and `MatrixRank` are exact the same way. The MATLAB spellings `inv`, `det`, `\`, `rref` and `null` work exactly too and then hand back decimals. A matrix that is singular — to working precision, when it has decimals in it — says so |
+| | a matrix of whole numbers and fractions, up to about forty by forty, is reduced exactly: `Inverse[{{1, 2}, {3, 4}}]` is `{{-2, 1}, {3/2, -1/2}}`, and `Det`, `LinearSolve`, `RowReduce`, `NullSpace` and `MatrixRank` are exact the same way. The MATLAB spellings `inv`, `det`, `\`, `rref` and `null` work exactly too and then hand back decimals. A matrix that is singular — to working precision, when it has decimals in it — says so. `Det` of a matrix with symbols in it, up to four by four, is written out: `Det[{{a, b}, {c, d}}]` is `a d - b c` |
 | `ConjugateTranspose`/`ctranspose` | rows for columns with every number conjugated |
 | `Dot[a, b]`, `a . b` | matrix multiplication |
 | `LinearSolve[a, b]`, `linsolve`, `a \ b` | solves a x = b |
