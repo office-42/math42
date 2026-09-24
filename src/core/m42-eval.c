@@ -12824,6 +12824,27 @@ magic_square (gint64 *m, gint64 n)
 #undef M
 }
 
+/* N of a value: a number or a constant as its decimal, and a list of
+ * them item by item, however deeply -- N[{Pi/4, Sqrt[2]}] was
+ * {Pi/4, Sqrt[2]}, only plain numbers being turned. */
+static M42Value *
+decimal_of (M42Value *v)
+{
+  double x;
+
+  if (v->kind != M42_VALUE_COMPLEX && value_number (v, &x))
+    return m42_value_real (x);
+  if (v->kind == M42_VALUE_LIST)
+    {
+      M42Value *out = m42_value_list_new ();
+
+      for (guint i = 0; i < m42_value_list_length (v); i++)
+        m42_value_list_append (out, decimal_of (m42_value_list_nth (v, i)));
+      return out;
+    }
+  return m42_value_ref (v);
+}
+
 static gboolean
 name_is (const char *name, const char *a, const char *b)
 {
@@ -13512,24 +13533,7 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
     return m42_value_ref (ARG (0));
   /* N asks for the decimal: 1/3 becomes 0.333333333333333. */
   if (name_is (name, "N", "double") && args->len >= 1)
-    {
-      double x;
-
-      if (value_number (ARG (0), &x))
-        return m42_value_real (x);
-      if (ARG (0)->kind == M42_VALUE_LIST)
-        {
-          M42Value *out = m42_value_list_new ();
-          for (guint i = 0; i < m42_value_list_length (ARG (0)); i++)
-            {
-              M42Value *e = m42_value_list_nth (ARG (0), i);
-              m42_value_list_append (out, is_num (e) ? m42_value_real (e->u.number)
-                                                     : m42_value_ref (e));
-            }
-          return out;
-        }
-      return m42_value_ref (ARG (0));
-    }
+    return decimal_of (ARG (0));
   /* The two halves of a fraction, as Mathematica hands them over. */
   if (name_is (name, "Numerator", NULL) && args->len == 1 && is_num (ARG (0)))
     return m42_value_number (ARG (0)->exact ? (double) ARG (0)->num : ARG (0)->u.number);
