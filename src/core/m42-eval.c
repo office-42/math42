@@ -14454,7 +14454,9 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
     }
   /* MATLAB's rand(m, n), randn(m, n) and randi(imax, m, n): an m by n
    * matrix of them.  randi takes its largest as a number or its range as
-   * [a b], and on its own gives one of them. */
+   * [a b], and on its own gives one of them.  A size of nothing counts
+   * as one against the limit, or rand(2^63 - 1, 0) makes that many empty
+   * rows. */
   if ((name_is (name, "rand", "randn") && args->len == 2) ||
       (name_is (name, "randi", NULL) && (args->len == 1 || args->len == 3)))
     {
@@ -14479,7 +14481,7 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
         }
       if (args->len > from &&
           (!whole_int64 (ARG (from), &rows) || !whole_int64 (ARG (from + 1), &cols) ||
-           rows < 0 || cols < 0 || (double) rows * cols > 1e6))
+           rows < 0 || cols < 0 || (double) MAX (rows, 1) * MAX (cols, 1) > 1e6))
         return m42_value_error ("%s wants a size of whole numbers, and not too many", name);
       if (args->len == 1)
         return m42_value_number (low + g_random_int_range (0, (gint32) (high - low + 1)));
