@@ -1212,7 +1212,7 @@ What is different:
 | a space before `(` | means multiplication, as it does in Mathematica: `2 x (x + 1)` is a product. Write a call with no space — `f(3)`, `v(2)` — unless the name is one math42 knows, where `Sin (x)` is still `Sin[x]` |
 | several return values | `[q, r] = size(A)` hands out the pieces of the list `size(A)` returns, and `{q, r} = …` does the same the Mathematica way; a function still returns one thing, which is that list |
 | `end` in a block | needed after `for`, `while` and `if`, as usual — and a one-line block needs a comma after its header |
-| strings | double quotes only |
+| strings | in double quotes, or MATLAB's single ones wherever a quote cannot be a transpose — `disp('hello')`, `x = 'it''s'` — while `A'`, `[1 2]'` and `y''` stay what they were |
 
 ## 7. What math42 does not do
 

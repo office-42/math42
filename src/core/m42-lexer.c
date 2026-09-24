@@ -145,6 +145,46 @@ m42_lexer_next (M42Lexer *lx)
       return t;
     }
 
+  /* MATLAB's 'single quotes', wherever a quote cannot be a transpose.
+   * A' and y'' come straight after what they act on -- a name, a
+   * number, a closing bracket, another quote -- and a string never
+   * does, so disp('hello') and x = 'abc' are strings while A' and
+   * f'[x] are what they were.  Inside, '' is one quote, as in 'it''s'.
+   * They used to be strings only in a .m file, which is turned into
+   * double quotes on the way in, so typed they were a syntax error. */
+  if (s[start] == '\'' &&
+      !(start > 0 && (isalnum ((unsigned char) s[start - 1]) ||
+                      strchr ("_)]}'.", s[start - 1]) != NULL)))
+    {
+      GString *text = g_string_new (NULL);
+
+      lx->pos = start + 1;
+      for (;;)
+        {
+          if (s[lx->pos] == '\0')
+            break;
+          if (s[lx->pos] == '\'' && s[lx->pos + 1] == '\'')
+            lx->pos++;
+          else if (s[lx->pos] == '\'')
+            break;
+          g_string_append_c (text, s[lx->pos++]);
+        }
+      if (s[lx->pos] != '\'')
+        {
+          t = simple (M42_TOK_ERROR, start);
+          t.text = g_strdup ("a string was not closed");
+          g_string_free (text, TRUE);
+        }
+      else
+        {
+          lx->pos++;
+          t = simple (M42_TOK_STRING, start);
+          t.text = g_string_free (text, FALSE);
+        }
+      t.space_before = space;
+      return t;
+    }
+
   if (isalpha ((unsigned char) s[start]) || s[start] == '_')
     {
       t = simple (M42_TOK_IDENT, start);
