@@ -1150,6 +1150,20 @@ format_one (const char *flags, gsize len, char kind, M42Value *v)
 }
 #pragma GCC diagnostic pop
 
+/* Mod as both languages mean it: the remainder with the sign of the
+ * divisor, so that Mod[-7, 3] is 2 -- C's fmod and % give it the sign
+ * of the dividend, and Mod[-7, 3] was -1.  rem is the one that keeps
+ * C's. */
+static double
+floored_mod (double a, double b)
+{
+  double r = fmod (a, b);
+
+  if (r != 0 && (r < 0) != (b < 0))
+    r += b;
+  return r;
+}
+
 /* An expression with no free names in it -- 2 Pi, Sqrt[2], E^2 -- as
  * the number it stands for.  It is what lets a symbolic constant be
  * used wherever a number is wanted: Plot[Sin[x], {x, 0, 2 Pi}] asks
@@ -1190,7 +1204,7 @@ constant_fold (const M42Node *n, double *out)
         case M42_TOK_MINUS:   *out = a - b; return TRUE;
         case M42_TOK_STAR:    *out = a * b; return TRUE;
         case M42_TOK_SLASH:   *out = a / b; return TRUE;
-        case M42_TOK_PERCENT: *out = fmod (a, b); return TRUE;
+        case M42_TOK_PERCENT: *out = floored_mod (a, b); return TRUE;
         case M42_TOK_CARET:   *out = pow (a, b); return TRUE;
         default: return FALSE;
         }
@@ -1666,7 +1680,7 @@ apply_op (int op, double a, double b)
     case M42_TOK_MINUS:   return a - b;
     case M42_TOK_STAR:    return a * b;
     case M42_TOK_SLASH:   return a / b;
-    case M42_TOK_PERCENT: return fmod (a, b);
+    case M42_TOK_PERCENT: return floored_mod (a, b);
     case M42_TOK_CARET:   return pow (a, b);
     case M42_TOK_EQ:      return a == b;
     case M42_TOK_NE:      return a != b;
@@ -1728,12 +1742,19 @@ exact_op (int op, const M42Value *a, const M42Value *b)
       den = (__int128) a->den * b->num;
       break;
     case M42_TOK_PERCENT:
-      if (a->den != 1 || b->den != 1 || b->num == 0)
+      /* p/q mod r/s is (p s mod r q)/(q s), floored as below.  In
+       * __int128, where -2^63 has a remainder by -1 like anything else;
+       * in a gint64 it is a trap. */
+      if (b->num == 0)
         return NULL;
-      /* In __int128, where -2^63 has a remainder by -1 like anything
-       * else; in a gint64 it is a trap. */
-      num = (__int128) a->num % b->num;
-      den = 1;
+      {
+        __int128 divisor = (__int128) b->num * a->den;
+
+        num = (__int128) a->num * b->den % divisor;
+        if (num != 0 && (num < 0) != (divisor < 0))
+          num += divisor;
+        den = (__int128) a->den * b->den;
+      }
       break;
     case M42_TOK_CARET:
       {
@@ -1873,6 +1894,13 @@ big_op (int op, const M42Value *a, const M42Value *b)
         if (!whole || m42_big_is_zero (y))
           return NULL;
         m42_big_free (m42_big_divide (x, y, &rest));
+        if (!m42_big_is_zero (rest) && rest->sign != y->sign)
+          {
+            M42Big *up = m42_big_add (rest, y);
+
+            m42_big_free (rest);
+            rest = up;
+          }
         return m42_value_bigint (g_steal_pointer (&rest));
       }
     case M42_TOK_EQ: case M42_TOK_NE: case M42_TOK_LT:
