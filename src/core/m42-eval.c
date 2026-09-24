@@ -12598,29 +12598,53 @@ call_builtin (M42Session *s, const char *name, GPtrArray *args)
     return make_filled (name, args, 0, FALSE);
   if (name_is (name, "ones", NULL))
     return make_filled (name, args, 1, FALSE);
+  /* ConstantArray[c, n] is n of c, and ConstantArray[c, {n, m}] an n
+   * by m array of it; c can be anything, a symbol or a list as well
+   * as a number. */
   if (name_is (name, "ConstantArray", NULL) && args->len == 2)
     {
-      double fill;
-      M42Value *err;
-      GPtrArray *sz = g_ptr_array_new ();
-      M42Value *r;
-      if (!need_number (ARG (0), name, &fill, &err))
-        return err;
+      g_autoptr (GArray) sizes = g_array_new (FALSE, FALSE, sizeof (gint64));
+      g_autoptr (M42Value) out = m42_value_ref (ARG (0));
+      double total = 1;
+
       if (ARG (1)->kind == M42_VALUE_LIST)
         for (guint i = 0; i < m42_value_list_length (ARG (1)); i++)
-          g_ptr_array_add (sz, m42_value_list_nth (ARG (1), i));
+          {
+            gint64 n = -1;
+
+            if (!whole_int64 (m42_value_list_nth (ARG (1), i), &n) || n < 0)
+              break;
+            g_array_append_val (sizes, n);
+          }
       else
-        g_ptr_array_add (sz, ARG (1));
-      r = make_filled (name, sz, fill, FALSE);
-      g_ptr_array_unref (sz);
-      if (sz->len == 1 && !is_error (r))
         {
-          M42Value *flat = m42_value_list_new ();
-          flatten_into (r, flat);
-          m42_value_unref (r);
-          return flat;
+          gint64 n = -1;
+
+          if (whole_int64 (ARG (1), &n) && n >= 0)
+            g_array_append_val (sizes, n);
         }
-      return r;
+      /* A size of nothing counts as one here: the inside is built
+       * first, and {0, 10^9} would make a row of 10^9 before finding
+       * that none of it was wanted. */
+      for (guint i = 0; i < sizes->len; i++)
+        total *= MAX (g_array_index (sizes, gint64, i), 1);
+      if (sizes->len == 0 ||
+          (ARG (1)->kind == M42_VALUE_LIST && sizes->len != m42_value_list_length (ARG (1))))
+        return m42_value_error ("%s expects a size, or a list of them", name);
+      if (total > 1e6)
+        return m42_value_error ("%s: size out of range", name);
+
+      /* Built from the inside out, the last size first. */
+      for (guint i = sizes->len; i > 0; i--)
+        {
+          M42Value *level = m42_value_list_new ();
+
+          for (gint64 k = 0; k < g_array_index (sizes, gint64, i - 1); k++)
+            m42_value_list_append (level, m42_value_ref (out));
+          m42_value_unref (out);
+          out = level;
+        }
+      return g_steal_pointer (&out);
     }
 
   if (name_is (name, "Transpose", "transpose") && args->len == 1)
