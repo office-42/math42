@@ -682,7 +682,7 @@ In[26]:= Series[Tan[x], {x, 0, 7}]     Out[26]= x + x^3/3 + 2 x^5/15 + 17 x^7/31
 | `TrigExpand[e]` | the other way: `Sin[x + y]` is `Sin[x] Cos[y] + Cos[x] Sin[y]`, and `Sin[2 x]` is `2 Sin[x] Cos[x]` |
 | `TrigToExp[e]`, `ExpToTrig[e]` | waves as exponentials of an imaginary angle, and back |
 | `PowerExpand[e]` | `Log[a b]` as `Log[a] + Log[b]`, taking the letters for positive numbers |
-| `Solve[lhs == rhs, x]` | every root of a polynomial, complex ones included |
+| `Solve[lhs == rhs, x]` | every root of a polynomial, complex ones included; a quadratic with exact coefficients exactly, `Solve[x^2 == 2, x]` being `{{x -> -Sqrt[2]}, {x -> Sqrt[2]}}` |
 | `Solve[a x^3 + b x^2 + c x + d == 0, x]` | a cubic with letters for coefficients, by Cardano: three roots, written with the cube roots of one |
 | `Solve[eq, x, Modulus -> n]` | the equation where the arithmetic wraps round: `Solve[3 x == 1, x, Modulus -> 7]` is `x -> 5` |
 | `Reduce[eq, x]` | the whole answer with its conditions: `a x + b == 0` is `a != 0 && x == -(b/a) \|\| a == 0 && b == 0`. An inequality gives the stretches of the line where it holds — `Reduce[x^2 - 4 > 0, x]` is `x < -2 \|\| x > 2` |
@@ -1168,7 +1168,7 @@ What is different:
 |---|---|
 | `Sin[2]` | a decimal, not `Sin[2]` — only constants and the exact angles stay exact |
 | `2^100` | a decimal: exact arithmetic is 64 bits wide |
-| `Solve` | numeric roots, found by iteration, not closed forms |
+| `Solve` | numeric roots, found by iteration, except for a line and a quadratic, which have their closed forms |
 | `Integrate` | the rules of a first course; anything else is kept as written or done numerically |
 | patterns | `f[x_]` names an argument; there is no pattern matching beyond that |
 | `Simplify` | knows the identities that need no assumptions — `Sin[x]^2 + Cos[x]^2` is 1 — but cannot be told that a letter is positive or real, so it will not prove the ones that need it |

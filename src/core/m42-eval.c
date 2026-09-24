@@ -1329,7 +1329,15 @@ value_to_node (const M42Value *v)
       if (v->exact && v->den != 1)
         return m42_node_binary (M42_TOK_SLASH, m42_node_number ((double) v->num),
                                 m42_node_number ((double) v->den));
-      return m42_node_number (v->u.number);
+      {
+        /* A decimal stays one in a tree too, whole or not, as it does
+         * when it is typed: 2.0 put into x^2 == a is not the 2 of
+         * x^2 == 2. */
+        M42Node *number = m42_node_number (v->u.number);
+
+        number->op = !v->exact;
+        return number;
+      }
     case M42_VALUE_EXPR:
       return m42_node_copy (v->u.expr);
     case M42_VALUE_STRING:
@@ -9769,6 +9777,95 @@ compare_roots (gconstpointer a, gconstpointer b)
   return 0;
 }
 
+/* The roots of a x^2 + b x + c == 0 with a, b and c exact numbers,
+ * by the formula, worked out and tidied the way everything else is:
+ * x^2 == 2 is x -> -Sqrt[2] and x -> Sqrt[2], where the doubles gave
+ * -1.4142135623731 and 1.41421356237309, and 2 x^2 - 3 x + 1 == 0 is
+ * 1/2 and 1.  NULL when a root does not come out exact -- a complex
+ * pair whose square root is not a whole one -- for the numbers to do
+ * as before. */
+static M42Value *
+exact_quadratic (M42Session *s, const M42Node *lhs, const char *var)
+{
+  g_autoptr (GPtrArray) terms = m42_node_poly_terms (lhs, var);
+  M42Value *found[2] = { NULL, NULL };
+  double _Complex where[2];
+  M42Value *out;
+  guint how_many = 2;
+
+  if (terms == NULL || terms->len != 3)
+    return NULL;
+  for (int side = 0; side < 2; side++)
+    {
+      const M42Node *c = g_ptr_array_index (terms, 0);
+      const M42Node *b = g_ptr_array_index (terms, 1);
+      const M42Node *a = g_ptr_array_index (terms, 2);
+      M42Node *under =
+        m42_node_binary (M42_TOK_MINUS,
+                         m42_node_binary (M42_TOK_CARET, m42_node_copy (b), m42_node_number (2)),
+                         m42_node_binary (M42_TOK_STAR, m42_node_number (4),
+                                          m42_node_binary (M42_TOK_STAR, m42_node_copy (a),
+                                                           m42_node_copy (c))));
+      g_autoptr (M42Node) root =
+        m42_node_binary (M42_TOK_SLASH,
+                         m42_node_binary (side == 0 ? M42_TOK_MINUS : M42_TOK_PLUS,
+                                          m42_node_unary (M42_TOK_MINUS, m42_node_copy (b)),
+                                          m42_node_call1 ("Sqrt", under)),
+                         m42_node_binary (M42_TOK_STAR, m42_node_number (2), m42_node_copy (a)));
+      M42Value *v = eval (s, root);
+
+      if (v->kind == M42_VALUE_EXPR)
+        {
+          M42Node *simpler = simplify_hard (s, v->u.expr);
+
+          m42_value_unref (v);
+          v = expr_result (simpler);
+        }
+      found[side] = v;
+      if (!(v->kind == M42_VALUE_NUMBER && v->exact) && v->kind != M42_VALUE_BIGINT &&
+          !(v->kind == M42_VALUE_EXPR && value_is_constant (v) && !has_decimal (v->u.expr)))
+        {
+          g_clear_pointer (&found[0], m42_value_unref);
+          g_clear_pointer (&found[1], m42_value_unref);
+          return NULL;
+        }
+      {
+        double x = NAN;
+
+        value_number (v, &x);
+        where[side] = x;
+      }
+    }
+
+  /* The lesser first, as Mathematica writes them, and a double root
+   * once. */
+  if (compare_roots (&where[0], &where[1]) > 0)
+    {
+      M42Value *t = found[0];
+
+      found[0] = found[1];
+      found[1] = t;
+    }
+  if (cabs (where[0] - where[1]) <= 1e-12 * MAX (1.0, cabs (where[0])))
+    {
+      g_clear_pointer (&found[1], m42_value_unref);
+      how_many = 1;
+    }
+  out = m42_value_list_new ();
+  for (guint i = 0; i < how_many; i++)
+    {
+      M42Node *rule = m42_node_new (M42_NODE_RULE);
+      M42Value *pair = m42_value_list_new ();
+
+      g_ptr_array_add (rule->children, m42_node_ident (var));
+      g_ptr_array_add (rule->children, value_to_node (found[i]));
+      m42_value_unref (found[i]);
+      m42_value_list_append (pair, m42_value_expr (rule));
+      m42_value_list_append (out, pair);
+    }
+  return out;
+}
+
 /* Solve[f == g, x]: exactly, root by root, when the equation is a
  * polynomial -- complex roots and all -- and by scanning for sign
  * changes when it is not. */
@@ -10134,6 +10231,17 @@ solve (M42Session *s, const M42Node *call)
   {
     g_autoptr (GArray) coeffs = g_array_new (FALSE, TRUE, sizeof (double));
 
+    if (poly_coeffs (lhs, var, coeffs, 0) && coeffs->len == 3 && !has_decimal (lhs))
+      {
+        M42Value *exact = exact_quadratic (s, lhs, var);
+
+        if (exact != NULL)
+          {
+            m42_value_unref (out);
+            g_array_unref (roots);
+            return exact;
+          }
+      }
     if (poly_coeffs (lhs, var, coeffs, 0) && coeffs->len >= 2)
       {
         g_autoptr (GArray) found = g_array_new (FALSE, FALSE, sizeof (double _Complex));
