@@ -1758,17 +1758,6 @@ exact_op (int op, const M42Value *a, const M42Value *b)
   return m42_value_rational ((gint64) num, (gint64) den);
 }
 
-/* A whole number of either size, as a big one. */
-static M42Big *
-as_big (const M42Value *v)
-{
-  if (v->kind == M42_VALUE_BIGINT)
-    return m42_big_copy (v->u.big);
-  if (v->kind == M42_VALUE_NUMBER && v->exact && v->den == 1)
-    return m42_big_from_int64 (v->num);
-  return NULL;
-}
-
 /* TRUE when a value is a whole number, however large. */
 static gboolean
 is_whole (const M42Value *v)
@@ -1777,58 +1766,171 @@ is_whole (const M42Value *v)
          (v->kind == M42_VALUE_NUMBER && v->exact && v->den == 1);
 }
 
-/* Arithmetic when at least one side has outgrown a gint64.  Returns
- * NULL for anything that is not whole-number work. */
+/* An exact number of either size, as a fraction of big ones with the
+ * bottom above nothing; FALSE for a decimal. */
+static gboolean
+as_big_fraction (const M42Value *v, M42Big **top, M42Big **bottom)
+{
+  if (v->kind == M42_VALUE_BIGINT)
+    {
+      *top = m42_big_copy (v->u.big);
+      *bottom = m42_big_from_int64 (1);
+      return TRUE;
+    }
+  if (v->kind == M42_VALUE_NUMBER && v->exact)
+    {
+      *top = m42_big_from_int64 (v->num);
+      *bottom = m42_big_from_int64 (v->den);
+      return TRUE;
+    }
+  return FALSE;
+}
+
+/* top/bottom in lowest terms: the whole number it is, if it is one;
+ * the exact fraction, if its two halves fit in a gint64; and
+ * otherwise the decimal nearest it -- never a whole number it is not.
+ * (2^100 + 1)/2^70 used to go to the doubles, which could not tell it
+ * from 2^30, and came back as the exact 1073741824. */
+static M42Value *
+big_fraction (const M42Big *top, const M42Big *bottom)
+{
+  g_autoptr (M42Big) a = m42_big_copy (top);
+  g_autoptr (M42Big) b = m42_big_copy (bottom);
+  g_autoptr (M42Big) p = NULL;
+  g_autoptr (M42Big) q = NULL;
+  gint64 small_p, small_q;
+
+  if (m42_big_is_zero (bottom))
+    return NULL;
+  /* Euclid, on the sizes.  Past a few thousand digits a common factor
+   * would have to be nearly all of both for the answer to fit, and the
+   * search for one is not worth its time: the decimal is the answer. */
+  a->sign = a->sign != 0;
+  b->sign = 1;
+  if (a->len > 400 || b->len > 400)
+    return m42_value_real (m42_big_ratio (top, bottom));
+  while (!m42_big_is_zero (b))
+    {
+      M42Big *rest = NULL;
+
+      m42_big_free (m42_big_divide (a, b, &rest));
+      m42_big_free (a);
+      a = b;
+      b = rest;
+      b->sign = b->sign != 0;
+    }
+  if (m42_big_is_zero (a))
+    return m42_value_number (0);
+  p = m42_big_divide (top, a, NULL);
+  q = m42_big_divide (bottom, a, NULL);
+  if (q->sign < 0)
+    {
+      p->sign = -p->sign;
+      q->sign = 1;
+    }
+  if (m42_big_fits_int64 (q, &small_q) && small_q == 1)
+    return m42_value_bigint (g_steal_pointer (&p));
+  if (m42_big_fits_int64 (p, &small_p) && m42_big_fits_int64 (q, &small_q))
+    return m42_value_rational (small_p, small_q);
+  return m42_value_real (m42_big_ratio (p, q));
+}
+
+/* Arithmetic on exact numbers when at least one side has outgrown a
+ * gint64: whole numbers exactly, and fractions of them as exactly as
+ * big_fraction can give them back.  Returns NULL for a decimal, or
+ * anything else that is not exact work. */
 static M42Value *
 big_op (int op, const M42Value *a, const M42Value *b)
 {
   g_autoptr (M42Big) x = NULL;
+  g_autoptr (M42Big) x_under = NULL;
   g_autoptr (M42Big) y = NULL;
+  g_autoptr (M42Big) y_under = NULL;
+  gboolean whole;
 
-  if (!is_whole (a) || !is_whole (b))
+  if (!as_big_fraction (a, &x, &x_under))
     return NULL;
-  x = as_big (a);
-  y = as_big (b);
-  if (x == NULL || y == NULL)
+  if (!as_big_fraction (b, &y, &y_under))
     return NULL;
+  whole = is_whole (a) && is_whole (b);
 
   switch (op)
     {
-    case M42_TOK_PLUS:  return m42_value_bigint (m42_big_add (x, y));
-    case M42_TOK_MINUS: return m42_value_bigint (m42_big_subtract (x, y));
-    case M42_TOK_STAR:  return m42_value_bigint (m42_big_multiply (x, y));
+    case M42_TOK_PLUS:
+    case M42_TOK_MINUS:
+      {
+        g_autoptr (M42Big) left = m42_big_multiply (x, y_under);
+        g_autoptr (M42Big) right = m42_big_multiply (y, x_under);
+        g_autoptr (M42Big) top = op == M42_TOK_PLUS ? m42_big_add (left, right)
+                                                    : m42_big_subtract (left, right);
+        g_autoptr (M42Big) bottom = m42_big_multiply (x_under, y_under);
+
+        return whole ? m42_value_bigint (g_steal_pointer (&top)) : big_fraction (top, bottom);
+      }
+    case M42_TOK_STAR:
+      {
+        g_autoptr (M42Big) top = m42_big_multiply (x, y);
+        g_autoptr (M42Big) bottom = m42_big_multiply (x_under, y_under);
+
+        return whole ? m42_value_bigint (g_steal_pointer (&top)) : big_fraction (top, bottom);
+      }
+    case M42_TOK_SLASH:
+      {
+        g_autoptr (M42Big) top = m42_big_multiply (x, y_under);
+        g_autoptr (M42Big) bottom = m42_big_multiply (x_under, y);
+
+        /* Over nothing is the doubles' Infinity, as it always was. */
+        if (m42_big_is_zero (y))
+          return NULL;
+        if (whole)
+          {
+            g_autoptr (M42Big) rest = NULL;
+            g_autoptr (M42Big) quotient = m42_big_divide (x, y, &rest);
+
+            if (m42_big_is_zero (rest))
+              return m42_value_bigint (g_steal_pointer (&quotient));
+          }
+        return big_fraction (top, bottom);
+      }
     case M42_TOK_CARET:
       {
         gint64 e;
 
-        if (!m42_big_fits_int64 (y, &e) || e < 0 || e > 1000000)
+        if (!whole || !m42_big_fits_int64 (y, &e) || e < 0 || e > 1000000)
           return NULL;
         return m42_value_bigint (m42_big_power (x, (guint64) e));
       }
-    case M42_TOK_SLASH:
     case M42_TOK_PERCENT:
       {
-        gint64 divisor, remainder;
-        g_autoptr (M42Big) quotient = NULL;
+        g_autoptr (M42Big) rest = NULL;
 
-        if (!m42_big_fits_int64 (y, &divisor) || divisor == 0)
-          return NULL;
-        quotient = m42_big_divide_small (x, divisor, &remainder);
         /* The remainder is a whole number and is kept as one: past
          * 2^53 the double it was made into lost its last digit. */
-        if (op == M42_TOK_PERCENT)
-          return m42_value_exact_int (remainder);
-        if (remainder != 0)
-          return NULL;              /* not a whole answer: the doubles take it */
-        return m42_value_bigint (m42_big_copy (quotient));
+        if (!whole || m42_big_is_zero (y))
+          return NULL;
+        m42_big_free (m42_big_divide (x, y, &rest));
+        return m42_value_bigint (g_steal_pointer (&rest));
       }
-    case M42_TOK_EQ:  return m42_value_number (m42_big_compare (x, y) == 0);
-    case M42_TOK_NE:  return m42_value_number (m42_big_compare (x, y) != 0);
-    case M42_TOK_LT:  return m42_value_number (m42_big_compare (x, y) < 0);
-    case M42_TOK_LE:  return m42_value_number (m42_big_compare (x, y) <= 0);
-    case M42_TOK_GT:  return m42_value_number (m42_big_compare (x, y) > 0);
-    case M42_TOK_GE:  return m42_value_number (m42_big_compare (x, y) >= 0);
-    default:          return NULL;
+    case M42_TOK_EQ: case M42_TOK_NE: case M42_TOK_LT:
+    case M42_TOK_LE: case M42_TOK_GT: case M42_TOK_GE:
+      {
+        /* Crosswise, the bottoms being above nothing. */
+        g_autoptr (M42Big) left = m42_big_multiply (x, y_under);
+        g_autoptr (M42Big) right = m42_big_multiply (y, x_under);
+        int order = m42_big_compare (left, right);
+
+        switch (op)
+          {
+          case M42_TOK_EQ: return m42_value_number (order == 0);
+          case M42_TOK_NE: return m42_value_number (order != 0);
+          case M42_TOK_LT: return m42_value_number (order < 0);
+          case M42_TOK_LE: return m42_value_number (order <= 0);
+          case M42_TOK_GT: return m42_value_number (order > 0);
+          default:         return m42_value_number (order >= 0);
+          }
+      }
+    default:
+      return NULL;
     }
 }
 

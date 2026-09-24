@@ -37,6 +37,11 @@ M42Big *m42_big_power (const M42Big *a, guint64 e);
 /* a divided by a small number, with the remainder if wanted; NULL when
  * the divisor is nothing. */
 M42Big *m42_big_divide_small (const M42Big *a, gint64 d, gint64 *remainder);
+/* a divided by b, rounded toward nothing, with the remainder (which
+ * has the sign of a) if wanted; NULL when b is nothing. */
+M42Big *m42_big_divide (const M42Big *a, const M42Big *b, M42Big **remainder);
+/* a/b as a double, even when a and b are each beyond the doubles. */
+double   m42_big_ratio (const M42Big *a, const M42Big *b);
 M42Big *m42_big_factorial (guint n);
 
 int      m42_big_compare (const M42Big *a, const M42Big *b);

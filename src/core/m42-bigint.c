@@ -332,6 +332,135 @@ m42_big_divide_small (const M42Big *a, gint64 d, gint64 *remainder)
   return big_trim (out);
 }
 
+/* The leading digits of a as a double, and how many digits of the base
+ * were left off the end to get them. */
+static double
+leading (const M42Big *a, guint *dropped)
+{
+  guint keep = MIN (a->len, 30);
+  double total = 0;
+
+  for (guint i = a->len; i > a->len - keep; i--)
+    total = total * M42_BIG_BASE + a->digit[i - 1];
+  *dropped = a->len - keep;
+  return a->sign < 0 ? -total : total;
+}
+
+double
+m42_big_ratio (const M42Big *a, const M42Big *b)
+{
+  /* Thirty digits of each are two hundred and seventy decimal places,
+   * far more than a double keeps and far fewer than it can hold; what
+   * was dropped from each is put back as a power of the base, a step at
+   * a time so that nothing overflows on the way that does not overflow
+   * at the end. */
+  guint drop_a, drop_b;
+  double ratio = leading (a, &drop_a) / leading (b, &drop_b);
+
+  for (guint i = drop_b; i < drop_a && isfinite (ratio) && ratio != 0; i++)
+    ratio *= M42_BIG_BASE;
+  for (guint i = drop_a; i < drop_b && ratio != 0; i++)
+    ratio /= M42_BIG_BASE;
+  return ratio;
+}
+
+/* Whether d times b is no more than a, sizes only. */
+static gboolean
+fits_times (const M42Big *b, guint32 d, const M42Big *a)
+{
+  g_autoptr (M42Big) times = m42_big_from_int64 (d);
+  g_autoptr (M42Big) trial = m42_big_multiply (b, times);
+
+  return compare_size (trial, a) <= 0;
+}
+
+M42Big *
+m42_big_divide (const M42Big *a, const M42Big *b, M42Big **remainder)
+{
+  M42Big *quotient;
+  g_autoptr (M42Big) size = NULL;
+  M42Big *rest;
+  guint head;
+
+  if (b->sign == 0)
+    return NULL;
+  size = m42_big_copy (b);
+  size->sign = 1;
+  quotient = big_alloc (a->len);
+
+  /* Long division.  The leading digits of a, one fewer than b has, go
+   * into what is left at once, since nothing can be taken from them;
+   * then the rest are brought down one at a time, and each digit of
+   * the quotient is guessed from the leading digits of the two -- good
+   * to one either way -- and settled by trying its neighbours, or the
+   * whole range beyond them if it were ever further out than that. */
+  head = MIN (size->len - 1, a->len);
+  rest = big_alloc (head);
+  if (head > 0)
+    memcpy (rest->digit, a->digit + (a->len - head), sizeof (guint32) * head);
+  rest->sign = 1;
+  big_trim (rest);
+
+  for (guint i = a->len - head; i > 0; i--)
+    {
+      M42Big *down = big_alloc (rest->len + 1);
+      double guess;
+      guint32 low, high;
+
+      memcpy (down->digit + 1, rest->digit, sizeof (guint32) * rest->len);
+      down->digit[0] = a->digit[i - 1];
+      down->sign = 1;
+      m42_big_free (rest);
+      rest = big_trim (down);
+      if (compare_size (rest, size) < 0)
+        continue;
+
+      /* The digit is at least one, since what is left is at least b;
+       * low always fits, and the search closes in from both sides. */
+      guess = floor (m42_big_ratio (rest, size));
+      low = (guint32) CLAMP (guess - 1, 1, M42_BIG_BASE - 1);
+      high = (guint32) CLAMP (guess + 1, 1, M42_BIG_BASE - 1);
+      if (!fits_times (size, low, rest))
+        {
+          high = low - 1;
+          low = 1;
+        }
+      else if (fits_times (size, high, rest))
+        {
+          low = high;
+          high = M42_BIG_BASE - 1;
+        }
+      while (low < high)
+        {
+          guint32 middle = low + (high - low + 1) / 2;
+
+          if (fits_times (size, middle, rest))
+            low = middle;
+          else
+            high = middle - 1;
+        }
+      quotient->digit[i - 1] = low;
+      {
+        g_autoptr (M42Big) times = m42_big_from_int64 (low);
+        g_autoptr (M42Big) trial = m42_big_multiply (size, times);
+        M42Big *less = subtract_sizes (rest, trial);
+
+        m42_big_free (rest);
+        rest = less;
+      }
+    }
+
+  quotient->sign = a->sign * b->sign;
+  big_trim (quotient);
+  if (rest->sign != 0)
+    rest->sign = a->sign;
+  if (remainder != NULL)
+    *remainder = rest;
+  else
+    m42_big_free (rest);
+  return quotient;
+}
+
 M42Big *
 m42_big_factorial (guint n)
 {
