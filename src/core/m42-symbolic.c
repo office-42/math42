@@ -3477,10 +3477,13 @@ expand_node (const M42Node *n, int depth)
             if (num->kind == M42_NODE_BINARY &&
                 (num->op == M42_TOK_PLUS || num->op == M42_TOK_MINUS))
               {
-                M42Node *left = DIV (CP (m42_node_child (num, 0)), CP (den));
-                M42Node *right = DIV (CP (m42_node_child (num, 1)), den);
+                g_autoptr (M42Node) left = DIV (CP (m42_node_child (num, 0)), CP (den));
+                g_autoptr (M42Node) right = DIV (CP (m42_node_child (num, 1)), den);
                 int op = num->op;
 
+                /* expand_node copies what it is given, so the two
+                 * halves are freed here; they were not, and every
+                 * Expand of a sum over something lost them. */
                 m42_node_free (num);
                 return m42_node_binary (op, expand_node (left, depth + 1),
                                         expand_node (right, depth + 1));

@@ -4662,8 +4662,12 @@ fourier_series (M42Session *s, const M42Node *call, gboolean coefficients_only)
                                                  m42_node_child (spec, 2), 0, FALSE);
 
       if (exact != NULL)
-        out = simplify_hard (s, m42_node_binary (M42_TOK_SLASH, exact,
-                                                 m42_node_number (2)));
+        {
+          g_autoptr (M42Node) halved = m42_node_binary (M42_TOK_SLASH, exact,
+                                                        m42_node_number (2));
+
+          out = simplify_hard (s, halved);
+        }
       else
         out = coefficient_node (a0 / 2);
     }
@@ -4672,12 +4676,16 @@ fourier_series (M42Session *s, const M42Node *call, gboolean coefficients_only)
     {
       double ak = fourier_integral (s, m42_node_child (call, 0), var, lo, hi, k, FALSE);
       double bk = fourier_integral (s, m42_node_child (call, 0), var, lo, hi, k, TRUE);
-      M42Node *ak_node = fourier_coefficient_node (s, m42_node_child (call, 0), var,
-                                                   m42_node_child (spec, 1),
-                                                   m42_node_child (spec, 2), k, FALSE);
-      M42Node *bk_node = fourier_coefficient_node (s, m42_node_child (call, 0), var,
-                                                   m42_node_child (spec, 1),
-                                                   m42_node_child (spec, 2), k, TRUE);
+      /* The closed forms go into the series; the list of coefficients
+       * is the measured ones, and has no use for them. */
+      M42Node *ak_node = coefficients_only ? NULL
+        : fourier_coefficient_node (s, m42_node_child (call, 0), var,
+                                    m42_node_child (spec, 1),
+                                    m42_node_child (spec, 2), k, FALSE);
+      M42Node *bk_node = coefficients_only ? NULL
+        : fourier_coefficient_node (s, m42_node_child (call, 0), var,
+                                    m42_node_child (spec, 1),
+                                    m42_node_child (spec, 2), k, TRUE);
 
       if (fabs (ak) < 1e-9)
         ak = 0;
