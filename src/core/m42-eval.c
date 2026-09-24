@@ -2933,6 +2933,262 @@ exact_definite (M42Session *s, const M42Node *anti, const char *var,
   return difference;
 }
 
+/* --- where an integrand has no value ------------------------------------
+ *
+ * Integrate[1/x, {x, -1, 1}] was 0: F(1) - F(-1) of Log[Abs[x]], which
+ * steps over the pole in the middle as if it were not there, and the
+ * quadrature summed the two halves of it into nothing.  An integral
+ * over a point where the function goes off to infinity exists only if
+ * it goes off slowly enough, and a point like that has to be found
+ * before anything is added up.
+ *
+ * The points are found in the tree, not by sampling the function, which
+ * steps over a pole between two samples: a quotient's denominator, the
+ * base of a negative power and the argument of Log are nothing there,
+ * and Tan and Sec have their poles where Cos is nothing, Cot and Csc
+ * where Sin is.  Near each one, the function goes as |x - c|^p for
+ * some p, read off its values at c + h for h a thousandth, then a ten
+ * thousandth and so on; the integral converges there if p > -1, as
+ * 1/Sqrt[x] and Log[x] do at nothing, and not if p <= -1, as 1/x and
+ * 1/x^2 do.  The line between is drawn a hair inside -1, so that a
+ * logarithm on top of 1/x -- Log[x]/x, which diverges -- falls on the
+ * side it belongs to.
+ */
+
+/* The expressions whose zeros are where n may have no value. */
+static void
+trouble_spots (M42Session *s, const M42Node *n, const char *var, GPtrArray *out)
+{
+  const M42Node *zero_of = NULL;
+  M42Node *made = NULL;
+
+  if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_SLASH)
+    zero_of = m42_node_child (n, 1);
+  else if (n->kind == M42_NODE_BINARY && n->op == M42_TOK_CARET)
+    {
+      double e;
+
+      if (constant_fold (m42_node_child (n, 1), &e) && e < 0)
+        zero_of = m42_node_child (n, 0);
+    }
+  else if (n->kind == M42_NODE_CALL && n->children->len == 1)
+    {
+      const char *f = n->name;
+
+      if (strcmp (f, "Log") == 0 || strcmp (f, "log") == 0)
+        zero_of = m42_node_child (n, 0);
+      else if (strcmp (f, "Tan") == 0 || strcmp (f, "tan") == 0 ||
+               strcmp (f, "Sec") == 0 || strcmp (f, "sec") == 0)
+        zero_of = made = m42_node_call1 ("Cos", m42_node_copy (m42_node_child (n, 0)));
+      else if (strcmp (f, "Cot") == 0 || strcmp (f, "cot") == 0 ||
+               strcmp (f, "Csc") == 0 || strcmp (f, "csc") == 0)
+        zero_of = made = m42_node_call1 ("Sin", m42_node_copy (m42_node_child (n, 0)));
+    }
+  if (zero_of != NULL && m42_node_depends_on (zero_of, var))
+    g_ptr_array_add (out, made != NULL ? g_steal_pointer (&made) : m42_node_copy (zero_of));
+  m42_node_free (made);
+  for (guint i = 0; i < n->children->len; i++)
+    trouble_spots (s, m42_node_child (n, i), var, out);
+}
+
+/* The zeros of u in [lo, hi], added to points: all the real roots of a
+ * polynomial, and for anything else the places where it changes sign
+ * or dips to nothing between samples. */
+static void
+zeros_in (M42Session *s, const M42Node *u, const char *var, double lo, double hi, GArray *points)
+{
+  g_autoptr (GArray) coeffs = g_array_new (FALSE, TRUE, sizeof (double));
+  const int n = 2000;
+  double step = (hi - lo) / n;
+  double prev_x = lo, prev_u = number_at (s, u, var, lo), before_u = NAN;
+  double biggest = 0;
+
+  if (poly_coeffs (u, var, coeffs, 0) && coeffs->len >= 2)
+    {
+      g_autoptr (GArray) roots = g_array_new (FALSE, FALSE, sizeof (double _Complex));
+
+      if (polynomial_roots (coeffs, roots))
+        {
+          for (guint i = 0; i < roots->len; i++)
+            {
+              double _Complex r = g_array_index (roots, double _Complex, i);
+              double x = creal (r);
+
+              if (fabs (cimag (r)) <= 1e-7 * MAX (1.0, fabs (x)) && x >= lo && x <= hi)
+                g_array_append_val (points, x);
+            }
+          return;
+        }
+    }
+
+  for (int i = 0; i <= n; i++)
+    biggest = MAX (biggest, isfinite (number_at (s, u, var, lo + i * step))
+                            ? fabs (number_at (s, u, var, lo + i * step)) : 0);
+  for (int i = 1; i <= n; i++)
+    {
+      double x = i == n ? hi : lo + i * step;
+      double here = number_at (s, u, var, x);
+
+      if (here == 0)
+        g_array_append_val (points, x);
+      else if (isfinite (here) && isfinite (prev_u) && prev_u != 0 && (here < 0) != (prev_u < 0))
+        {
+          /* A change of sign, closed in on by halving; kept if u is
+           * small there, and not a jump over a pole of its own. */
+          double a = prev_x, b = x, ua = prev_u;
+
+          for (int k = 0; k < 200 && b - a > 1e-15 * MAX (1.0, fabs (a)); k++)
+            {
+              double m = (a + b) / 2, um = number_at (s, u, var, m);
+
+              if (!isfinite (um))
+                break;
+              if ((um < 0) == (ua < 0))
+                {
+                  a = m;
+                  ua = um;
+                }
+              else
+                b = m;
+            }
+          if (fabs (number_at (s, u, var, (a + b) / 2)) <= 1e-6 * MAX (biggest, 1e-300))
+            {
+              double c = (a + b) / 2;
+
+              g_array_append_val (points, c);
+            }
+        }
+      else if (isfinite (before_u) && isfinite (prev_u) && isfinite (here) &&
+               fabs (prev_u) < fabs (before_u) && fabs (prev_u) <= fabs (here) &&
+               fabs (prev_u) <= 1e-3 * MAX (biggest, 1e-300))
+        {
+          /* Down to nearly nothing and up again without a change of
+           * sign, as Abs[x] and Sin[x]^2 do: the bottom of the dip, by
+           * golden section. */
+          double a = prev_x - step, b = x;
+          const double g = 0.3819660112501051;
+
+          for (int k = 0; k < 120; k++)
+            {
+              double m1 = a + g * (b - a), m2 = b - g * (b - a);
+
+              if (fabs (number_at (s, u, var, m1)) <= fabs (number_at (s, u, var, m2)))
+                b = m2;
+              else
+                a = m1;
+            }
+          if (fabs (number_at (s, u, var, (a + b) / 2)) <= 1e-7 * MAX (biggest, 1e-300))
+            {
+              double c = (a + b) / 2;
+
+              g_array_append_val (points, c);
+            }
+        }
+      before_u = prev_u;
+      prev_u = here;
+      prev_x = x;
+    }
+}
+
+/* Whether f goes off to infinity at c, approached from the side given
+ * (1 above, -1 below), too fast to be integrated: |f| as |x - c|^p with
+ * p at most -1, at three scales running, so that a function that only
+ * looks that way at one of them is not taken for it. */
+static gboolean
+diverges_at (M42Session *s, const M42Node *f, const char *var, double c, int side)
+{
+  double h = 1e-3 * MAX (1.0, fabs (c));
+  double before = fabs (number_at (s, f, var, c + side * h));
+
+  if (!isfinite (before) || before == 0)
+    return isinf (before);
+  for (int k = 0; k < 3; k++)
+    {
+      double here;
+
+      h /= 10;
+      here = fabs (number_at (s, f, var, c + side * h));
+      if (isinf (here))
+        return TRUE;
+      if (isnan (here) || here == 0 || -log10 (here / before) > -0.99)
+        return FALSE;
+      before = here;
+    }
+  return TRUE;
+}
+
+/* The points in [a, b] where f has no value: none of them where the
+ * integral diverges, which is said; the ones strictly inside, where it
+ * converges, for the quadrature to be split at, into inside.  Returns
+ * FALSE when the integral does not converge. */
+static gboolean
+integrable_over (M42Session *s, const M42Node *integrand, const M42Node *f,
+                 const char *var, double a, double b, GArray *inside)
+{
+  g_autoptr (GPtrArray) spots = g_ptr_array_new_with_free_func ((GDestroyNotify) m42_node_free);
+  g_autoptr (GArray) points = g_array_new (FALSE, FALSE, sizeof (double));
+  double lo = isfinite (a) ? a : (isfinite (b) ? MIN (b, 0) - 1000 : -1000);
+  double hi = isfinite (b) ? b : (isfinite (a) ? MAX (a, 0) + 1000 : 1000);
+
+  if (!(lo < hi))
+    return TRUE;
+  trouble_spots (s, integrand, var, spots);
+  for (guint i = 0; i < spots->len; i++)
+    zeros_in (s, g_ptr_array_index (spots, i), var, lo, hi, points);
+  if (isfinite (a))
+    g_array_append_val (points, a);
+  if (isfinite (b))
+    g_array_append_val (points, b);
+  g_array_sort (points, compare_doubles);
+
+  for (guint i = 0; i < points->len; i++)
+    {
+      double c = g_array_index (points, double, i);
+
+      if (i > 0 && c - g_array_index (points, double, i - 1) <= 1e-9 * MAX (1.0, fabs (c)))
+        continue;
+      if ((c < b && diverges_at (s, f, var, c, 1)) || (c > a && diverges_at (s, f, var, c, -1)))
+        return FALSE;
+      if (inside != NULL && c > a && c < b && !isfinite (number_at (s, f, var, c)))
+        g_array_append_val (inside, c);
+    }
+  return TRUE;
+}
+
+/* The answer when it does not converge, in the words Mathematica uses. */
+static M42Value *
+does_not_converge (const char *who, const M42Node *integrand, const M42Value *va,
+                   const M42Value *vb)
+{
+  g_autoptr (GString) f = g_string_new (NULL);
+  g_autofree char *from = m42_value_to_string (va);
+  g_autofree char *to = m42_value_to_string (vb);
+
+  m42_node_to_string (f, integrand);
+  return m42_value_error ("%s: the integral of %s does not converge on {%s, %s}",
+                          who, f->str, from, to);
+}
+
+/* TRUE when an antiderivative, put in at an end at infinity, is
+ * infinite there: the integral out to it grows without end, as
+ * Log[x^2 + 1]/2 does for x/(x^2 + 1). */
+static gboolean
+infinite_at_infinity (M42Session *s, const M42Node *anti, const char *var, const M42Value *end)
+{
+  g_autoptr (M42Node) at = NULL;
+  g_autoptr (M42Node) where = NULL;
+  g_autoptr (M42Value) v = NULL;
+
+  if (end->kind != M42_VALUE_NUMBER || !isinf (end->u.number))
+    return FALSE;
+  where = value_to_node (end);
+  at = m42_node_substitute (anti, var, where);
+  if (at == NULL)
+    return FALSE;
+  v = eval (s, at);
+  return v->kind == M42_VALUE_NUMBER && isinf (v->u.number);
+}
+
 /* Integrate[f, x] is the antiderivative; Integrate[f, {x, a, b}] is
  * F(b) - F(a) when there is one, and Simpson when there is not.
  * NIntegrate is always Simpson. */
@@ -2948,6 +3204,7 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
   g_autoptr (M42Value) va = NULL;
   g_autoptr (M42Value) vb = NULL;
   g_autoptr (M42Value) exact = NULL;
+  g_autoptr (GArray) inside = NULL;
   double exact_x = NAN;
 
   if (call->children->len != 2)
@@ -3009,11 +3266,20 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
       }
   }
 
+  integrand = symbolic_argument (s, m42_node_child (call, 0), var);
   if (!numeric_only)
-    {
-      integrand = symbolic_argument (s, m42_node_child (call, 0), var);
-      anti = m42_node_integrate (integrand, var);
-    }
+    anti = m42_node_integrate (integrand, var);
+
+  /* A point inside where it does not converge, or an end at infinity
+   * where the antiderivative is infinite, and there is no integral:
+   * 1/x on {-1, 1}, 1/x on {1, Infinity}.  Mathematica says so, and so
+   * does this, rather than give the number that adding up would. */
+  inside = g_array_new (FALSE, FALSE, sizeof (double));
+  if (!integrable_over (s, integrand, m42_node_child (call, 0), var, a, b, inside) ||
+      (anti != NULL && (infinite_at_infinity (s, anti, var, va) ||
+                        infinite_at_infinity (s, anti, var, vb))))
+    return does_not_converge (numeric_only ? "NIntegrate" : "Integrate", integrand, va, vb);
+
   if (anti != NULL)
     {
       /* The antiderivative at both ends; if either is not a number --
@@ -3108,6 +3374,28 @@ integrate (M42Session *s, const M42Node *call, gboolean numeric_only)
         g_ptr_array_add (unevaluated->children, m42_node_copy (spec));
         return m42_value_expr (unevaluated);
       }
+    }
+
+  /* A point inside where the function has no value but the integral
+   * converges -- 1/Sqrt[Abs[x]] at nothing -- is made an end of two
+   * integrals, where the rule that crowds its points towards the ends
+   * can reach it; Simpson's panels straddled it and answered 3.76 for
+   * what is 4. */
+  if (inside->len > 0)
+    {
+      double total = 0, from = a;
+
+      for (guint i = 0; i <= inside->len && isfinite (total); i++)
+        {
+          double to = i < inside->len ? g_array_index (inside, double, i) : b;
+          g_autoptr (M42Value) piece = tanh_sinh (s, m42_node_child (call, 0), var, from, to);
+          double x;
+
+          total = piece != NULL && value_number (piece, &x) ? total + x : NAN;
+          from = to;
+        }
+      if (isfinite (total))
+        return quadrature_result (total);
     }
 
   {
